@@ -1,0 +1,51 @@
+{
+  "MDL": {
+    "ID": 1,
+    "SensorCount": 2,
+    "RelayControl": 0,
+    "WorkPin": 255,
+    "APpassword": "quantix_admin",
+    "InvertFlow": false,
+    "InvertRelay": false
+  },
+  "Sensors": [
+    {
+      "comment": "--- MOTOR 0 (SEMILLA) ---",
+      "FlowPin": 17,
+      "IN1": 32,
+      "IN2": 33,
+      "Kp": 2.5,
+      "Ki": 1.5,
+      "Kd": 0.0,
+      "MinPWM": 150,
+      "MaxPWM": 4095,
+      "MaxIntegral": 4095,
+      "PIDtime": 50,
+      "Deadband": 2,
+      "BrakePoint": 15,
+      "SlewRate": 40,
+      "MeterCal": 50.0,
+      "TargetUPM": 0.0,
+      "PulseSampleSize": 5
+    },
+    {
+      "comment": "--- MOTOR 1 (FERTILIZANTE) ---",
+      "FlowPin": 16,
+      "IN1": 25,
+      "IN2": 26,
+      "Kp": 2.5,
+      "Ki": 1.5,
+      "Kd": 0.0,
+      "MinPWM": 150,
+      "MaxPWM": 4095,
+      "MaxIntegral": 4095,
+      "PIDtime": 50,
+      "Deadband": 2,
+      "BrakePoint": 15,
+      "SlewRate": 40,
+      "MeterCal": 50.0,
+      "TargetUPM": 0.0,
+      "PulseSampleSize": 5
+    }
+  ]
+}
