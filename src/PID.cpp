@@ -4,125 +4,103 @@
 
 // Variables de estado del PID
 uint32_t LastCheck[MaxProductCount];
-float LastPWM[MaxProductCount] = { 0 };
+float LastPWM[MaxProductCount] = {0};
 float IntegralSum[MaxProductCount];
 
-// Timer para el reporte de datos a MQTT (Gráfico)
-uint32_t PidLogTimer[MaxProductCount] = {0};
-
-// --- FUNCIÓN: RESETEAR ESTADO ---
-// Se llama desde MQTT_Custom.cpp cuando cambias la config o pones manual
 void ResetPIDState(byte ID)
 {
-    IntegralSum[ID] = 0.0f;  // Borrar memoria acumulada
-    LastPWM[ID] = 0.0f;      // Borrar última salida
-    Sensor[ID].PWM = 0;      // Borrar salida actual
-    LastCheck[ID] = millis();// Reiniciar temporizador
-    
+    IntegralSum[ID] = 0.0f;
+    LastPWM[ID] = 0.0f;
+    Sensor[ID].PWM = 0;
+    LastCheck[ID] = millis();
     Serial.printf("[PID] Reset Estado Motor %d\n", ID);
 }
 
-// --- FUNCIÓN PRINCIPAL PID ---
-// Se llama desde el loop principal
 void PIDmotor(byte ID)
 {
-    // PROTECCIÓN DE SEGURIDAD:
-    // Si por error la config vino con 0, forzamos 50ms para evitar división por cero o bucle infinito
-    if (Sensor[ID].PIDtime < 10) Sensor[ID].PIDtime = 50;
+    if (Sensor[ID].PIDtime < 10)
+        Sensor[ID].PIDtime = 50;
 
-    // Solo calculamos si el flujo está habilitado y hay un objetivo
-    // O si estamos en modo Manual
-    if (Sensor[ID].FlowEnabled && Sensor[ID].TargetUPM > 0)
+    // --- 1. MODO APAGADO O MANUAL ---
+    if (!Sensor[ID].FlowEnabled || Sensor[ID].TargetUPM <= 0)
     {
-        // Verificar temporizador del PID
-        if (millis() - LastCheck[ID] >= Sensor[ID].PIDtime)
-        {
-            // Calculamos dt asegurando que no sea 0 para que la integral funcione
-            uint32_t now = millis();
-            float dt = (now - LastCheck[ID]) / 1000.0f; 
-            if (dt <= 0.0) dt = 0.05f; // Default a 50ms si dt da error
-            
-            LastCheck[ID] = now;
+        IntegralSum[ID] = 0; // Limpiamos memoria
+        LastPWM[ID] = 0;
 
-            // Recuperar valor anterior
-            float Result = LastPWM[ID];
-
-            // 1. CÁLCULO DE ERROR
-            float RateError = Sensor[ID].TargetUPM - Sensor[ID].UPM;
-            float errorPct = 0;
-            if(Sensor[ID].TargetUPM > 0) 
-                errorPct = (fabsf(RateError) / Sensor[ID].TargetUPM) * 100.0f;
-
-            // 2. LÓGICA PID
-            
-            // A) Deadband (Zona Muerta)
-            bool inDeadband = false;
-            if (errorPct <= Sensor[ID].Deadband) { 
-                RateError = 0; 
-                inDeadband = true;
-            }
-
-            // B) Brake Point
-            float BrakeFactor = 1.0f;
-            if (Sensor[ID].BrakePoint > 0 && errorPct < Sensor[ID].BrakePoint) {
-                BrakeFactor = errorPct / (float)Sensor[ID].BrakePoint;
-                if (BrakeFactor < 0.2f) BrakeFactor = 0.2f; 
-            }
-
-            // C) Término Proporcional
-            float pTerm = RateError * Sensor[ID].Kp * BrakeFactor;
-
-            // D) Término Integral
-            bool saturado = false;
-            if (LastPWM[ID] >= Sensor[ID].MaxPWM && RateError > 0) saturado = true;
-            if (LastPWM[ID] <= Sensor[ID].MinPWM && RateError < 0) saturado = true;
-
-            // IMPORTANTE: Aquí es donde fallaba antes si dt era 0
-            if (!saturado && !inDeadband) {
-                IntegralSum[ID] += RateError * Sensor[ID].Ki * dt;
-                
-                float iLimit = Sensor[ID].MaxIntegral; 
-                if (iLimit == 0) iLimit = 100.0f; 
-                IntegralSum[ID] = constrain(IntegralSum[ID], -iLimit, iLimit);
-            }
-
-            float targetOutput = pTerm + IntegralSum[ID];
-
-            // E) Slew Rate
-            float change = targetOutput - Result;
-            if (Sensor[ID].SlewRate > 0) {
-                change = constrain(change, -(float)Sensor[ID].SlewRate, (float)Sensor[ID].SlewRate);
-            }
-
-            Result += change;
-
-            // 3. LIMITACIÓN FINAL
-            // Si el PID calcula menos que el mínimo, forzamos el mínimo para vencer inercia
-            // (Siempre que no estemos en zona muerta con error 0)
-            if (Result < Sensor[ID].MinPWM && !inDeadband) {
-                Result = Sensor[ID].MinPWM;
-            } else {
-                 Result = constrain(Result, (float)Sensor[ID].MinPWM, (float)Sensor[ID].MaxPWM);
-            }
-           
-            
-            // Guardamos estado
-            LastPWM[ID] = Result;
-            Sensor[ID].PWM = Result; 
-            
-            // Debug Opcional (Descomentar solo si es necesario)
-            // if(ID == 0) Serial.printf("T:%.1f A:%.1f PWM:%.0f\n", Sensor[ID].TargetUPM, Sensor[ID].UPM, Result);
-        }
+        // Si no está en automático, usa el slider manual de la web. Si no, 0.
+        Sensor[ID].PWM = (!Sensor[ID].AutoOn) ? Sensor[ID].ManualAdjust : 0;
+        SetPWM(ID, Sensor[ID].PWM);
+        return;
     }
-    else
+
+    // --- 2. CÁLCULO PID AUTOMÁTICO ---
+    if (millis() - LastCheck[ID] >= Sensor[ID].PIDtime)
     {
-        IntegralSum[ID] = 0;
-        if (!Sensor[ID].AutoOn) {
-            Sensor[ID].PWM = Sensor[ID].ManualAdjust;
-            LastPWM[ID] = Sensor[ID].ManualAdjust;
-        } else {
-            Sensor[ID].PWM = 0;
-            LastPWM[ID] = 0;
+        float dt = (millis() - LastCheck[ID]) / 1000.0f;
+        if (dt <= 0.0)
+            dt = 0.05f;
+        LastCheck[ID] = millis();
+
+        float target = Sensor[ID].TargetUPM;
+        float actual = Sensor[ID].UPM;
+        float error = target - actual;
+
+        // A) Zona Muerta (Evita que el motor "tiemble" cuando ya llegó)
+        float errorPct = (fabs(error) / target) * 100.0f;
+        if (errorPct <= Sensor[ID].Deadband)
+        {
+            error = 0;
+        }
+
+        // B) Término Proporcional (Reacción inmediata)
+        float pTerm = error * Sensor[ID].Kp;
+
+        // C) Término Integral (Fuerza acumulativa) con ANTI-WINDUP
+        // Solo integramos si no estamos chocando contra los límites de hardware
+        bool saturadoAlto = (LastPWM[ID] >= Sensor[ID].MaxPWM && error > 0);
+        bool saturadoBajo = (LastPWM[ID] <= Sensor[ID].MinPWM && error < 0);
+
+        if (!saturadoAlto && !saturadoBajo && error != 0)
+        {
+            IntegralSum[ID] += (error * Sensor[ID].Ki * dt);
+
+            // Límite de seguridad para la memoria integral
+            float iLimit = Sensor[ID].MaxIntegral > 0 ? Sensor[ID].MaxIntegral : 4095.0f;
+            IntegralSum[ID] = constrain(IntegralSum[ID], -iLimit, iLimit);
+        }
+
+        // D) Salida Teórica
+        float output = pTerm + IntegralSum[ID];
+
+        // E) Vencer Inercia: Si calculó algo mayor a 0, pero menor al mínimo de arranque, forzamos el mínimo
+        if (output > 0 && output < Sensor[ID].MinPWM)
+        {
+            output = Sensor[ID].MinPWM;
+        }
+
+        // F) Slew Rate (Aceleración controlada para cuidar los engranajes)
+        if (Sensor[ID].SlewRate > 0)
+        {
+            float maxChange = Sensor[ID].SlewRate;
+            if (output > LastPWM[ID] + maxChange)
+                output = LastPWM[ID] + maxChange;
+            if (output < LastPWM[ID] - maxChange)
+                output = LastPWM[ID] - maxChange;
+        }
+
+        // G) Límite Físico Final
+        output = constrain(output, Sensor[ID].MinPWM, Sensor[ID].MaxPWM);
+
+        // --- 3. APLICAR AL HARDWARE ---
+        LastPWM[ID] = output;
+        Sensor[ID].PWM = (int)output;
+        SetPWM(ID, Sensor[ID].PWM);
+
+        // --- 4. DEBUG DE ALTA CALIDAD ---
+        if (ID == 0)
+        {
+            Serial.printf("⚙️ PID[M0] TGT:%.1f ACT:%.1f | ERR:%.1f | P:%.1f I:%.1f | OUT:%.0f\n",
+                          target, actual, error, pTerm, IntegralSum[ID], output);
         }
     }
 }
