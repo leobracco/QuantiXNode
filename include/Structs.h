@@ -46,13 +46,17 @@ struct SensorConfig {
     // Pines específicos ESP32 (Puente H)
     uint8_t IN1;                // Pin Motor A
     uint8_t IN2;                // Pin Motor B
-    //Calibracion
-    // --- NUEVO: RPM y Calibración ---
-    float RPM;                  // RPM actuales
-    uint16_t PulsesPerRev;      // Pulsos por vuelta (para calcular RPM real)
-    
-    volatile bool CalibActive;  // ¿Calibrando? (modificado desde callback MQTT)
-    uint32_t CalibTargetPulses; // Meta de pulsos (ej: 240)
+
+    // --- Modelo mecánico y calibración ---
+    // El motor mueve un engranaje; un sensor cuenta cada diente que pasa.
+    // Una vuelta completa del engranaje genera `DientesPorVuelta` pulsos.
+    // Durante la calibración el usuario hace girar N vueltas y mide los
+    // gramos dosificados: `GramosPorPulso = gramos_medidos / N*DientesPorVuelta`.
+    float RPM;                      // RPM calculadas a partir de Hz
+    uint16_t DientesPorVuelta;      // Cantidad de dientes del engranaje (antes: PulsesPerRev)
+
+    volatile bool CalibrandoAhora;  // true durante una calibración activa (antes: CalibActive)
+    uint32_t PulsosMetaCalibracion; // Meta de pulsos al calibrar (antes: CalibTargetPulses)
     // --------------------------------
     // Estado y Control
     bool FlowEnabled;           // Si la sección/motor está activo
@@ -66,7 +70,8 @@ struct SensorConfig {
     float PWM;                  // Salida actual calculada (0-255)
     float Hz;                   // Frecuencia actual de pulsos
     volatile uint32_t TotalPulses; // Acumulador para volumen (incrementado en GetUPM, leído en loop)
-    float MeterCal;             // Calibración (Pulsos por Unidad)
+    float GramosPorPulso;          // Constante de calibración (antes: MeterCal).
+                                   // gramos dosificados por cada pulso del sensor.
 
     // --- PARÁMETROS PID AVANZADO ---
     float Kp;

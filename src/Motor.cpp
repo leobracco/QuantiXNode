@@ -77,7 +77,7 @@ void CheckCalibration()
 {
     for (int i = 0; i < MDL.SensorCount; i++)
     {
-        if (!Sensor[i].CalibActive)
+        if (!Sensor[i].CalibrandoAhora)
             continue;
 
         noInterrupts();
@@ -85,9 +85,9 @@ void CheckCalibration()
         interrupts();
 
         // Como reseteamos a 0 al iniciar, TotalPulses ES el recorrido actual.
-        if (totalPulsesSnapshot >= Sensor[i].CalibTargetPulses)
+        if (totalPulsesSnapshot >= Sensor[i].PulsosMetaCalibracion)
         {
-            Sensor[i].CalibActive = false;
+            Sensor[i].CalibrandoAhora = false;
             Sensor[i].ManualAdjust = 0;
             Sensor[i].PWM = 0;
             SetPWM(i, 0);

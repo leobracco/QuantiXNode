@@ -18,7 +18,8 @@ uint32_t mqttReconnectBackoff = quantix::constants::MQTT_RECONNECT_BASE_MS;
 char uid[13];
 
 // Tópicos Dinámicos
-char topicStatus[64], topicTarget[64], topicConfig[64], topicCmd[64], topicTest[64], topicCal[64];
+char topicStatus[64], topicTarget[64], topicConfig[64], topicCmd[64];
+char topicTest[64], topicCal[64], topicRelays[64];
 
 void obtenerUID()
 {
@@ -69,7 +70,8 @@ void handleConfigMsg(JsonDocument& doc)
             Sensor[id].MinPWM = (uint16_t)pwmMin;
             Sensor[id].MaxPWM = (uint16_t)pwmMax;
         }
-        Sensor[id].MeterCal = c["meter_cal"] | Sensor[id].MeterCal;
+        // El backend envía la clave histórica "meter_cal" (gramos/pulso).
+        Sensor[id].GramosPorPulso = c["meter_cal"] | Sensor[id].GramosPorPulso;
         ResetPIDState(id);
     }
     SaveData();
@@ -142,29 +144,108 @@ void handleCalMsg(JsonDocument& doc)
 
     if (strcmp(cmd, "start") == 0 && pulsosMeta > 0)
     {
-        Sensor[id].CalibActive = false;
+        Sensor[id].CalibrandoAhora = false;
 
         noInterrupts();
         Sensor[id].TotalPulses = 0;
         interrupts();
 
-        Sensor[id].CalibTargetPulses = (uint32_t)pulsosMeta;
+        Sensor[id].PulsosMetaCalibracion = (uint32_t)pulsosMeta;
         Sensor[id].ManualAdjust = pwmVal;
         Sensor[id].AutoOn = false;
 
         SetPWM(id, pwmVal);
-        Sensor[id].CalibActive = true;
+        Sensor[id].CalibrandoAhora = true;
 
         LOG_I("cal", "Start M%u meta=%ld pwm=%d", (unsigned)id, pulsosMeta, pwmVal);
     }
     else
     {
-        Sensor[id].CalibActive = false;
+        Sensor[id].CalibrandoAhora = false;
         Sensor[id].ManualAdjust = 0;
         Sensor[id].AutoOn = true;
         SetPWM(id, 0);
     }
     Sensor[id].CommTime = millis();
+}
+
+// --- E. PROCESAR RELAYS (corte por secciones o surco a surco) ---
+//
+// Formatos aceptados (el handler soporta ambos a la vez):
+//  1) Máscara completa (corte masivo por secciones):
+//        {"mask": 65535}          -> todas las 16 secciones ON
+//        {"mask": "0xFF00"}       -> mitad alta ON, mitad baja OFF
+//        {"low": 255, "high": 0}  -> idéntico con dos bytes separados
+//     Cada bit representa una sección: bit 0..7 = relés 0..7 (RelayLo),
+//     bit 8..15 = relés 8..15 (RelayHi).
+//
+//  2) Relay individual (surco a surco):
+//        {"id": 3, "on": true}
+//        {"id": 11, "on": false}
+//     id ∈ [0, 15]. Flips solo ese bit sin tocar los demás.
+//
+// El handler también refresca WifiSwitchesTimer para que el timeout de
+// CheckRelays no corte la salida por "sin comunicación".
+void handleRelaysMsg(JsonDocument& doc)
+{
+    // Formato 2: id + on
+    if (doc.containsKey("id") && doc.containsKey("on")) {
+        int rid = doc["id"].as<int>();
+        bool on = doc["on"].as<bool>();
+        if (rid < 0 || rid > 15) {
+            LOG_W("mqtt", "relays: id fuera de rango (%d)", rid);
+            return;
+        }
+        if (rid < 8) {
+            if (on) RelayLo |= (1u << rid);
+            else    RelayLo &= ~(1u << rid);
+        } else {
+            uint8_t off = rid - 8;
+            if (on) RelayHi |= (1u << off);
+            else    RelayHi &= ~(1u << off);
+        }
+        WifiSwitchesTimer = millis();
+        WifiMasterOn = false;  // Modo MQTT: las coms mantienen los relés vía CommTime
+        for (uint8_t i = 0; i < MDL.SensorCount; ++i)
+            Sensor[i].CommTime = millis();
+        LOG_D("relays", "Toggle rid=%d on=%d mask=%02X%02X",
+              rid, (int)on, RelayHi, RelayLo);
+        return;
+    }
+
+    // Formato 1: máscara completa
+    uint16_t mask = 0;
+    bool haveMask = false;
+
+    if (doc.containsKey("mask")) {
+        // Aceptamos entero o string "0x..." / decimal.
+        if (doc["mask"].is<const char*>()) {
+            const char* s = doc["mask"].as<const char*>();
+            mask = (uint16_t)strtoul(s, nullptr, 0);
+        } else {
+            mask = (uint16_t)(doc["mask"].as<uint32_t>() & 0xFFFFu);
+        }
+        haveMask = true;
+    } else if (doc.containsKey("low") || doc.containsKey("high")) {
+        uint8_t lo = (uint8_t)(doc["low"]  | 0);
+        uint8_t hi = (uint8_t)(doc["high"] | 0);
+        mask = ((uint16_t)hi << 8) | lo;
+        haveMask = true;
+    }
+
+    if (!haveMask) {
+        LOG_W("mqtt", "relays: falta 'mask' o 'id'+'on'");
+        return;
+    }
+
+    RelayLo = (uint8_t)(mask & 0xFF);
+    RelayHi = (uint8_t)((mask >> 8) & 0xFF);
+    WifiSwitchesTimer = millis();
+    WifiMasterOn = false;
+    for (uint8_t i = 0; i < MDL.SensorCount; ++i)
+        Sensor[i].CommTime = millis();
+
+    LOG_D("relays", "Mask update %02X%02X", RelayHi, RelayLo);
 }
 
 }  // namespace
@@ -184,6 +265,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length)
     else if (strcmp(topic, topicTarget) == 0)  handleTargetMsg(doc);
     else if (strcmp(topic, topicTest) == 0)    handleTestMsg(doc);
     else if (strcmp(topic, topicCal) == 0)     handleCalMsg(doc);
+    else if (strcmp(topic, topicRelays) == 0)  handleRelaysMsg(doc);
     else LOG_D("mqtt", "Topic ignorado: %s", topic);
 }
 void initMQTT()
@@ -197,6 +279,7 @@ void initMQTT()
     snprintf(topicCmd,    sizeof(topicCmd),    "agp/quantix/%s/cmd",    uid);
     snprintf(topicTest,   sizeof(topicTest),   "agp/quantix/%s/test",   uid);
     snprintf(topicCal,    sizeof(topicCal),    "agp/quantix/%s/cal",    uid);
+    snprintf(topicRelays, sizeof(topicRelays), "agp/quantix/%s/relays", uid);
 
     mqttClient.setBufferSize(2048);
     mqttClient.setKeepAlive(MDLnetwork.MqttKeepAlive);
@@ -242,6 +325,7 @@ boolean mqttReconnect()
     mqttClient.subscribe(topicCmd);
     mqttClient.subscribe(topicTest);
     mqttClient.subscribe(topicCal);
+    mqttClient.subscribe(topicRelays);
 
     // Announce: IP actual para que el gateway lo registre.
     StaticJsonDocument<quantix::constants::JSON_ANNOUNCE_DOC_SIZE> ann;
@@ -306,7 +390,7 @@ void sendMQTTStatus(byte ID)
     // Datos de tiempo real (snapshot atómico de campos volatile)
     noInterrupts();
     uint32_t totalPulsesSnapshot = Sensor[ID].TotalPulses;
-    bool calibActiveSnapshot = Sensor[ID].CalibActive;
+    bool calibandoSnapshot = Sensor[ID].CalibrandoAhora;
     interrupts();
 
     doc["rpm"] = (int)Sensor[ID].RPM;
@@ -316,16 +400,22 @@ void sendMQTTStatus(byte ID)
     // --- DATOS CLAVE PARA DOSIS REAL ---
     doc["pps_real"] = Sensor[ID].Hz;          // Frecuencia actual del encoder
     doc["pps_target"] = Sensor[ID].TargetUPM; // Frecuencia buscada por el PID
-    doc["meter_cal"] = Sensor[ID].MeterCal;   // Enviamos su propia constante de calibración
+    // Clave histórica "meter_cal" mantenida por compatibilidad con el backend.
+    doc["meter_cal"] = Sensor[ID].GramosPorPulso;
     // ------------------------------------
 
-    if (calibActiveSnapshot)
+    if (calibandoSnapshot)
         doc["calibrando"] = true;
 
     float load = (Sensor[ID].PWM / (float)quantix::constants::PWM_MAX) * 100.0f;
     if (load > 100) load = 100;
     if (load < 0)   load = 0;
     doc["load_pct"] = (int)load;
+
+    // Estado actual de relays (corte por secciones) para que el backend
+    // pueda mostrarlo y detectar divergencias. 16 bits packed.
+    uint16_t relayMask = ((uint16_t)RelayHi << 8) | (uint16_t)RelayLo;
+    doc["relays_mask"] = relayMask;
 
     char buffer[quantix::constants::JSON_STATUS_BUF_SIZE];
     size_t len = serializeJson(doc, buffer, sizeof(buffer));

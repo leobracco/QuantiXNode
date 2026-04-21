@@ -182,7 +182,7 @@ void SaveData()
         s["Deadband"] = Sensor[i].Deadband;
         s["BrakePoint"] = Sensor[i].BrakePoint;
         s["SlewRate"] = Sensor[i].SlewRate;
-        s["MeterCal"] = Sensor[i].MeterCal;
+        s["MeterCal"] = Sensor[i].GramosPorPulso;  // clave JSON histórica
         s["TargetUPM"] = Sensor[i].TargetUPM;
         s["PulseSampleSize"] = Sensor[i].PulseSampleSize;
     }
@@ -261,7 +261,7 @@ void LoadData()
         Sensor[i].Deadband = sensors[i]["Deadband"] | 2;
         Sensor[i].BrakePoint = sensors[i]["BrakePoint"] | 15;
         Sensor[i].SlewRate = sensors[i]["SlewRate"] | 40;
-        Sensor[i].MeterCal = sensors[i]["MeterCal"] | 50.0;
+        Sensor[i].GramosPorPulso = sensors[i]["MeterCal"] | 50.0;  // clave JSON histórica
         Sensor[i].TargetUPM = sensors[i]["TargetUPM"] | 0.0;
         
         Sensor[i].PulseSampleSize = sensors[i]["PulseSampleSize"] | 5;
@@ -401,9 +401,9 @@ void SetDefault()
         Sensor[i].ManualAdjust = 0;
         Sensor[i].AutoOn = true;
 
-        Sensor[i].PulsesPerRev = 24; // Default: 24 pulsos = 1 vuelta
+        Sensor[i].DientesPorVuelta = 24; // Default: engranaje de 24 dientes
         Sensor[i].RPM = 0;
-        Sensor[i].CalibActive = false;
+        Sensor[i].CalibrandoAhora = false;
         Sensor[i].TotalPulses = 0;
     }
     

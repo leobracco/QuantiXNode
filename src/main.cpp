@@ -89,7 +89,7 @@ void loop()
         // 3. Lógica de Motores
         for (int i = 0; i < MDL.SensorCount; i++)
         {
-            if (Sensor[i].CalibActive == true)
+            if (Sensor[i].CalibrandoAhora == true)
             {
                 Calibrando = true;
                 SetPWM(i, Sensor[i].ManualAdjust);
@@ -102,14 +102,14 @@ void loop()
                 {
                     LOG_D("cal", "M%d: %lu / %lu (PWM=%d)",
                           i, (unsigned long)totalPulsesSnapshot,
-                          (unsigned long)Sensor[i].CalibTargetPulses,
+                          (unsigned long)Sensor[i].PulsosMetaCalibracion,
                           Sensor[i].ManualAdjust);
                 }
 
-                if (totalPulsesSnapshot >= Sensor[i].CalibTargetPulses)
+                if (totalPulsesSnapshot >= Sensor[i].PulsosMetaCalibracion)
                 {
                     Calibrando = false;
-                    Sensor[i].CalibActive = false;
+                    Sensor[i].CalibrandoAhora = false;
                     Sensor[i].ManualAdjust = 0;
                     SetPWM(i, 0);
                     Sensor[i].AutoOn = true;

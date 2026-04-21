@@ -91,8 +91,8 @@ void GetUPM()
                 Sensor[i].Hz = 1000000.0f / (float)median;
                 Sensor[i].UPM = Sensor[i].Hz;
 
-                if (Sensor[i].PulsesPerRev > 0)
-                    Sensor[i].RPM = (Sensor[i].Hz * 60.0f) / (float)Sensor[i].PulsesPerRev;
+                if (Sensor[i].DientesPorVuelta > 0)
+                    Sensor[i].RPM = (Sensor[i].Hz * 60.0f) / (float)Sensor[i].DientesPorVuelta;
             }
         }
 
