@@ -1,14 +1,16 @@
 #include <Arduino.h>
 #include <Wire.h>
-#include <SPI.h>
 #include <WiFi.h>
 #include <Adafruit_PWMServoDriver.h>
 #include <PCF8574.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
+#include <esp_task_wdt.h>
 
 #include "Globals.h"
 #include "Structs.h"
+#include "Constants.h"
+#include "Log.h"
 
 // Variables Externas
 extern const uint16_t InoID;
@@ -35,22 +37,23 @@ void SaveNetworks();
 void LoadNetworks();
 
 void DoSetup() {
-    Serial.println(F("\n\n--- INICIANDO HARDWARE QUANTIX ---"));
+    LOG_I("boot", "Iniciando hardware QuantiX");
 
     // 1. Iniciar I2C
-    Wire.begin(); 
+    Wire.begin();
 
     // 2. Iniciar PCA9685 (Driver PWM)
     PWMServoDriver.begin();
-    PWMServoDriver.setOscillatorFrequency(27000000); 
-    PWMServoDriver.setPWMFreq(1000); 
-    Serial.println(F("✅ PCA9685 Configurado"));
+    PWMServoDriver.setOscillatorFrequency(27000000);
+    PWMServoDriver.setPWMFreq(quantix::constants::PWM_FREQ_HZ);
+    LOG_I("hw", "PCA9685 configurado");
 
     // 3. Cargar Configuración
     LoadData();
-    LoadNetworks(); // Cargar datos de red también
+    LoadNetworks();
 
-    if (!CheckPins()) Serial.println("⚠️ ERROR: Pines inválidos detectados.");
+    if (!CheckPins())
+        LOG_W("cfg", "Pines inválidos detectados");
 
     // 4. Configurar Pines y Hardware
     if (MDL.WorkPin != NC) pinMode(MDL.WorkPin, INPUT_PULLUP);
@@ -64,11 +67,11 @@ void DoSetup() {
             // Asignar ISR según el ID del motor
             if (i == 0) {
                 attachInterrupt(digitalPinToInterrupt(Sensor[i].FlowPin), ISR_Sensor0, RISING);
-                Serial.printf("✅ Encoder M0 activo en Pin %d\n", Sensor[i].FlowPin);
+                LOG_I("hw", "Encoder M0 activo en pin %u", Sensor[i].FlowPin);
             }
             else if (i == 1) {
                 attachInterrupt(digitalPinToInterrupt(Sensor[i].FlowPin), ISR_Sensor1, RISING);
-                Serial.printf("✅ Encoder M1 activo en Pin %d\n", Sensor[i].FlowPin);
+                LOG_I("hw", "Encoder M1 activo en pin %u", Sensor[i].FlowPin);
             }
         }
 
@@ -82,11 +85,11 @@ void DoSetup() {
         uint8_t ch2 = i * 2 + 1; 
 
         if (Sensor[i].IN1 != NC) {
-            ledcSetup(ch1, 1000, 12); // 1000 Hz, 8 bit
-            ledcAttachPin(Sensor[i].IN1, ch1); 
+            ledcSetup(ch1, quantix::constants::PWM_FREQ_HZ, quantix::constants::PWM_RESOLUTION_BITS);
+            ledcAttachPin(Sensor[i].IN1, ch1);
         }
         if (Sensor[i].IN2 != NC) {
-            ledcSetup(ch2, 1000, 12);
+            ledcSetup(ch2, quantix::constants::PWM_FREQ_HZ, quantix::constants::PWM_RESOLUTION_BITS);
             ledcAttachPin(Sensor[i].IN2, ch2);
         }
 
@@ -98,47 +101,49 @@ void DoSetup() {
     if (MDL.RelayControl == 6 && PCF.begin()) PCF_found = true;
 
     // --- INICIO DE RED WIFI ---
-    WiFi.disconnect(true); 
+    WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
-    delay(500); // Pequeña pausa para estabilizar
 
-    Serial.println("--- Conectando WiFi ---");
-    
+    // En lugar de delay bloqueante usamos espera activa corta para dejar
+    // que el stack de WiFi se estabilice sin bloquear tareas del sistema.
+    const uint32_t wifiStabilizeUntil = millis() + 200;
+    while (millis() < wifiStabilizeUntil) { yield(); }
+
+    LOG_I("wifi", "Conectando WiFi");
+
     bool connected = false;
 
     // Intentar conectar a Router (Station Mode)
     if (MDLnetwork.WifiModeUseStation && strlen(MDLnetwork.SSID) > 0) {
         WiFi.mode(WIFI_STA);
         WiFi.begin(MDLnetwork.SSID, MDLnetwork.Password);
-        Serial.print("Conectando a: "); Serial.print(MDLnetwork.SSID);
-        
+        LOG_I("wifi", "Conectando a SSID: %s", MDLnetwork.SSID);
+
         uint32_t start = millis();
-        // Esperamos 10 seg max
-        while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
-            delay(500); Serial.print(".");
+        while (WiFi.status() != WL_CONNECTED &&
+               millis() - start < quantix::constants::AP_FALLBACK_TIMEOUT_MS) {
+            // yield + feed watchdog mientras esperamos conexión (sin bloquear 500ms)
+            delay(50);
+            esp_task_wdt_reset();
         }
-        
+
         if (WiFi.status() == WL_CONNECTED) {
-            Serial.println("\n✅ WiFi Conectado. IP: " + WiFi.localIP().toString());
+            LOG_I("wifi", "Conectado, IP=%s", WiFi.localIP().toString().c_str());
             connected = true;
         } else {
-            Serial.println("\n❌ Fallo conexión. Iniciando AP.");
+            LOG_W("wifi", "Fallo conexión, iniciando AP");
         }
     }
 
     // Si falló o no se pidió Station, levantar AP
     if (!connected) {
         WiFi.mode(WIFI_AP);
-        if (strlen(MDL.APpassword) < 8) strcpy(MDL.APpassword, "12345678");
-        
-        WiFi.softAP("Quantix_AP", MDL.APpassword);
-        Serial.println("✅ AP Creado: Quantix_AP");
-        Serial.print("IP AP: "); Serial.println(WiFi.softAPIP());
-    }
+        if (strlen(MDL.APpassword) < 8)
+            strlcpy(MDL.APpassword, "12345678", sizeof(MDL.APpassword));
 
-    // --- INICIAR MQTT ---
-    // Importante llamarlo al final del setup
-    initMQTT();
+        WiFi.softAP("Quantix_AP", MDL.APpassword);
+        LOG_I("wifi", "AP creado Quantix_AP, IP=%s", WiFi.softAPIP().toString().c_str());
+    }
 }
 
 // --- GESTIÓN JSON ---
@@ -153,6 +158,12 @@ void SaveData()
     doc["MDL"]["APpassword"] = MDL.APpassword;
     doc["MDL"]["InvertFlow"] = MDL.InvertFlow;
     doc["MDL"]["InvertRelay"] = MDL.InvertRelay;
+    doc["MDL"]["LogLevel"] = MDL.LogLevel;
+    doc["MDL"]["HttpUser"] = MDL.HttpUser;
+    doc["MDL"]["HttpPass"] = MDL.HttpPass;
+    doc["MDL"]["WatchdogSec"] = MDL.WatchdogSec;
+    doc["MDL"]["CommTimeoutMs"] = MDL.CommTimeoutMs;
+    doc["MDL"]["WifiTimeoutMs"] = MDL.WifiTimeoutMs;
     
     JsonArray sensors = doc.createNestedArray("Sensors");
     for (int i = 0; i < 2; i++) { 
@@ -178,30 +189,35 @@ void SaveData()
 
     File file = LittleFS.open(CONFIG_FILE, "w");
     if (!file) {
-        Serial.println("Error escribiendo config.json");
+        LOG_E("cfg", "No se pudo abrir %s para escritura", CONFIG_FILE);
         return;
     }
     serializeJson(doc, file);
     file.close();
-    Serial.println("Config guardada.");
+    LOG_I("cfg", "Config guardada");
 }
 
 void LoadData()
 {
     if (!LittleFS.exists(CONFIG_FILE)) {
-        Serial.println("Config no existe, cargando default.");
+        LOG_W("cfg", "Config no existe, cargando defaults");
         SetDefault();
         SaveData();
         return;
     }
 
     File file = LittleFS.open(CONFIG_FILE, "r");
+    if (!file) {
+        LOG_E("cfg", "No se pudo abrir %s, usando defaults", CONFIG_FILE);
+        SetDefault();
+        return;
+    }
     StaticJsonDocument<2048> doc;
     DeserializationError error = deserializeJson(doc, file);
     file.close();
 
     if (error) {
-        Serial.println("JSON Error, cargando default.");
+        LOG_E("cfg", "JSON inválido (%s), cargando defaults", error.c_str());
         SetDefault();
         return;
     }
@@ -213,6 +229,14 @@ void LoadData()
     strlcpy(MDL.APpassword, doc["MDL"]["APpassword"] | "12345678", sizeof(MDL.APpassword));
     MDL.InvertFlow = doc["MDL"]["InvertFlow"] | false;
     MDL.InvertRelay = doc["MDL"]["InvertRelay"] | false;
+
+    MDL.LogLevel = doc["MDL"]["LogLevel"] | 2;  // INFO por defecto
+    strlcpy(MDL.HttpUser, doc["MDL"]["HttpUser"] | "admin", sizeof(MDL.HttpUser));
+    // Si no hay HttpPass configurado, reutilizamos APpassword para no dejar el portal abierto
+    strlcpy(MDL.HttpPass, doc["MDL"]["HttpPass"] | MDL.APpassword, sizeof(MDL.HttpPass));
+    MDL.WatchdogSec = doc["MDL"]["WatchdogSec"] | 5;
+    MDL.CommTimeoutMs = doc["MDL"]["CommTimeoutMs"] | 4000;
+    MDL.WifiTimeoutMs = doc["MDL"]["WifiTimeoutMs"] | 30000;
 
     JsonArray sensors = doc["Sensors"];
     for (int i = 0; i < 2; i++) {
@@ -240,9 +264,9 @@ void LoadData()
         Sensor[i].MeterCal = sensors[i]["MeterCal"] | 50.0;
         Sensor[i].TargetUPM = sensors[i]["TargetUPM"] | 0.0;
         
-        Sensor[i].PulseSampleSize = sensors[i]["PulseSampleSize"] | 5; 
+        Sensor[i].PulseSampleSize = sensors[i]["PulseSampleSize"] | 5;
     }
-    Serial.println("Datos cargados desde JSON.");
+    LOG_I("cfg", "Config cargada desde JSON");
 }
 void SaveNetworks()
 {
@@ -251,7 +275,18 @@ void SaveNetworks()
     doc["Password"] = MDLnetwork.Password;
     doc["Mode"] = MDLnetwork.WifiModeUseStation;
 
+    doc["mqtt_host"] = MDLnetwork.MqttHost;
+    doc["mqtt_port"] = MDLnetwork.MqttPort;
+    doc["mqtt_user"] = MDLnetwork.MqttUser;
+    doc["mqtt_pass"] = MDLnetwork.MqttPass;
+    doc["mqtt_keepalive"] = MDLnetwork.MqttKeepAlive;
+
     File file = LittleFS.open(NETWORK_FILE, "w");
+    if (!file)
+    {
+        LOG_E("net", "No se pudo abrir %s para escritura", NETWORK_FILE);
+        return;
+    }
     serializeJson(doc, file);
     file.close();
 }
@@ -259,18 +294,35 @@ void SaveNetworks()
 void LoadNetworks()
 {
     if (!LittleFS.exists(NETWORK_FILE)) {
-        SetDefault(); 
+        SetDefault();
         return;
     }
 
     File file = LittleFS.open(NETWORK_FILE, "r");
+    if (!file) {
+        LOG_E("net", "No se pudo abrir %s, usando defaults", NETWORK_FILE);
+        SetDefault();
+        return;
+    }
     StaticJsonDocument<512> doc;
-    deserializeJson(doc, file);
+    DeserializationError err = deserializeJson(doc, file);
     file.close();
+
+    if (err) {
+        LOG_E("net", "JSON inválido (%s), usando defaults", err.c_str());
+        SetDefault();
+        return;
+    }
 
     strlcpy(MDLnetwork.SSID, doc["SSID"] | "", sizeof(MDLnetwork.SSID));
     strlcpy(MDLnetwork.Password, doc["Password"] | "", sizeof(MDLnetwork.Password));
     MDLnetwork.WifiModeUseStation = doc["Mode"] | false;
+
+    strlcpy(MDLnetwork.MqttHost, doc["mqtt_host"] | "", sizeof(MDLnetwork.MqttHost));
+    MDLnetwork.MqttPort = doc["mqtt_port"] | 1883;
+    strlcpy(MDLnetwork.MqttUser, doc["mqtt_user"] | "", sizeof(MDLnetwork.MqttUser));
+    strlcpy(MDLnetwork.MqttPass, doc["mqtt_pass"] | "", sizeof(MDLnetwork.MqttPass));
+    MDLnetwork.MqttKeepAlive = doc["mqtt_keepalive"] | 15;
 }
 
 // --- UTILIDADES ---
@@ -300,9 +352,17 @@ void SetDefault()
 {
     MDL.ID = 1;
     MDL.SensorCount = 2; // <--- Activamos 2 motores
-    MDL.RelayControl = 0; 
+    MDL.RelayControl = 0;
     MDL.WorkPin = NC;
-    strcpy(MDL.APpassword, "12345678");
+    strlcpy(MDL.APpassword, "12345678", sizeof(MDL.APpassword));
+
+    // Defaults operacionales
+    MDL.LogLevel = 2;  // INFO
+    strlcpy(MDL.HttpUser, "admin", sizeof(MDL.HttpUser));
+    strlcpy(MDL.HttpPass, MDL.APpassword, sizeof(MDL.HttpPass));
+    MDL.WatchdogSec = 5;
+    MDL.CommTimeoutMs = 4000;
+    MDL.WifiTimeoutMs = 30000;
 
     // --- CONFIGURACIÓN DE PINES (HARDWARE) ---
     
@@ -347,6 +407,14 @@ void SetDefault()
         Sensor[i].TotalPulses = 0;
     }
     
-    strcpy(MDLnetwork.SSID, "");
-    strcpy(MDLnetwork.Password, "");
+    strlcpy(MDLnetwork.SSID, "", sizeof(MDLnetwork.SSID));
+    strlcpy(MDLnetwork.Password, "", sizeof(MDLnetwork.Password));
+    MDLnetwork.WifiModeUseStation = false;
+
+    // Defaults MQTT (antes estaban hardcodeados en MQTT_Custom.cpp)
+    strlcpy(MDLnetwork.MqttHost, "", sizeof(MDLnetwork.MqttHost));
+    MDLnetwork.MqttPort = 1883;
+    strlcpy(MDLnetwork.MqttUser, "", sizeof(MDLnetwork.MqttUser));
+    strlcpy(MDLnetwork.MqttPass, "", sizeof(MDLnetwork.MqttPass));
+    MDLnetwork.MqttKeepAlive = 15;
 }

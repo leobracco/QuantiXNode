@@ -1,14 +1,17 @@
 #include <Arduino.h>
 #include "Globals.h"
 #include "Structs.h"
+#include "Constants.h"
 
 // --- CONFIGURACIÓN DE FILTRO ---
-#define MIN_PULSE_MICROS 250
+// Filtro mínimo entre pulsos consecutivos para rechazar rebotes de encoder.
+constexpr uint32_t MIN_PULSE_MICROS = quantix::constants::MIN_PULSE_MICROS;
 
-// Variables
-uint32_t LastPulse[MaxProductCount];
-uint32_t ReadLast[MaxProductCount];
-uint32_t PulseTime[MaxProductCount];
+// Variables compartidas con la ISR — deben ser volatile para que el
+// compilador no cachee lecturas entre interrupciones.
+volatile uint32_t LastPulse[MaxProductCount];
+volatile uint32_t ReadLast[MaxProductCount];
+volatile uint32_t PulseTime[MaxProductCount];
 
 // Buffers
 volatile uint32_t Samples[MaxProductCount][MaxSampleSize];
@@ -62,41 +65,49 @@ void GetUPM()
 {
     for (int i = 0; i < MDL.SensorCount; i++)
     {
-        if (PulseCount[i] > 0)
-        {
-            LastPulse[i] = millis();
-            noInterrupts();
-            Sensor[i].TotalPulses += PulseCount[i];
-            PulseCount[i] = 0;
-            uint16_t count = SamplesCount[i];
-            uint32_t Snapshot[MaxSampleSize];
-            for (uint16_t k = 0; k < count; k++)
-                Snapshot[k] = Samples[i][k];
-            interrupts();
+        uint16_t pendingCount;
+        uint16_t samplesAvailable;
+        uint32_t snapshotBuf[MaxSampleSize];
 
-            uint32_t median = MedianFromArray(Snapshot, count);
+        noInterrupts();
+        pendingCount = PulseCount[i];
+        samplesAvailable = SamplesCount[i];
+        if (pendingCount > 0)
+        {
+            Sensor[i].TotalPulses += pendingCount;
+            PulseCount[i] = 0;
+            for (uint16_t k = 0; k < samplesAvailable; k++)
+                snapshotBuf[k] = Samples[i][k];
+            LastPulse[i] = millis();
+        }
+        interrupts();
+
+        if (pendingCount > 0)
+        {
+            uint32_t median = MedianFromArray(snapshotBuf, samplesAvailable);
 
             if (median > 0)
             {
-                // Hz = Pulsos por Segundo reales
                 Sensor[i].Hz = 1000000.0f / (float)median;
-
-                // CRÍTICO: El PID debe usar Hz (Pulsos/seg) para comparar con el Target del Bridge
                 Sensor[i].UPM = Sensor[i].Hz;
 
-                // RPM es solo para visualización
                 if (Sensor[i].PulsesPerRev > 0)
                     Sensor[i].RPM = (Sensor[i].Hz * 60.0f) / (float)Sensor[i].PulsesPerRev;
             }
         }
 
-        // Timeout: Si no hay pulsos, todo a cero
-        if (millis() - LastPulse[i] > 2000)
+        noInterrupts();
+        uint32_t lastPulseSnapshot = LastPulse[i];
+        interrupts();
+
+        if (millis() - lastPulseSnapshot > 2000)
         {
             Sensor[i].UPM = 0;
             Sensor[i].Hz = 0;
             Sensor[i].RPM = 0;
+            noInterrupts();
             SamplesCount[i] = 0;
+            interrupts();
         }
     }
 }

@@ -1,17 +1,17 @@
 #include <Arduino.h>
 #include <Wire.h>
-#include <SPI.h>
 #include <WiFi.h>
 #include <WebServer.h>
-#include <WiFiClient.h>
 #include <Adafruit_PWMServoDriver.h>
 #include <PCF8574.h>
-#include <ESP2SOTA.h>
 #include <LittleFS.h>
+#include <esp_task_wdt.h>
 
 #include "Structs.h"
 #include "Globals.h"
-#include "PCA95x5_RC.h"
+#include "Constants.h"
+#include "Log.h"
+#include "core/Median.h"
 
 // --- OBJETOS GLOBALES ---
 ModuleConfig MDL;
@@ -35,7 +35,6 @@ uint16_t PressureReading = 0;
 uint32_t ResetTime = 0;
 
 uint32_t LoopLast = 0;
-const uint32_t LoopTime = 50;
 
 bool WrkOn = false;
 bool WrkLast = false;
@@ -50,25 +49,36 @@ void setup()
 {
     // Iniciar Serial primero para ver errores de arranque
     Serial.begin(115200);
+    quantix::log::init(quantix::log::Level::INFO);  // nivel temporal hasta cargar config
 
     if (!LittleFS.begin(true))
     {
-        Serial.println("Fallo al montar LittleFS");
+        LOG_E("fs", "Fallo al montar LittleFS");
     }
 
     DoSetup();
+
+    // Configurar nivel de log definitivo a partir del config cargado.
+    quantix::log::setLevel(static_cast<quantix::log::Level>(MDL.LogLevel));
+
+    // Watchdog: se alimenta cada iteración de loop().
+    esp_task_wdt_init(MDL.WatchdogSec, true);
+    esp_task_wdt_add(NULL);
+
     initMQTT();
-    Serial.println(F("--- QUANTIX ARRANCADO (SOLO MQTT) ---"));
+    LOG_I("boot", "QuantiX listo (MQTT)");
 }
 
 void loop()
 {
+    esp_task_wdt_reset();
+
     // 1. Manejo de clientes y comunicaciones (Siempre activos)
     server.handleClient();
     mqttLoop();
 
-    // 2. Control de tiempo del bucle principal (50ms)
-    if (millis() - LoopLast >= LoopTime)
+    // 2. Control de tiempo del bucle principal
+    if (millis() - LoopLast >= quantix::constants::LOOP_INTERVAL_MS)
     {
         LoopLast = millis();
 
@@ -84,13 +94,19 @@ void loop()
                 Calibrando = true;
                 SetPWM(i, Sensor[i].ManualAdjust);
 
+                noInterrupts();
+                uint32_t totalPulsesSnapshot = Sensor[i].TotalPulses;
+                interrupts();
+
                 if (millis() % 500 < 50)
                 {
-                    Serial.printf("🧪 Calibrando M%d: %ld / %ld (PWM: %d)\n",
-                                  i, Sensor[i].TotalPulses, Sensor[i].CalibTargetPulses, Sensor[i].ManualAdjust);
+                    LOG_D("cal", "M%d: %lu / %lu (PWM=%d)",
+                          i, (unsigned long)totalPulsesSnapshot,
+                          (unsigned long)Sensor[i].CalibTargetPulses,
+                          Sensor[i].ManualAdjust);
                 }
 
-                if (Sensor[i].TotalPulses >= Sensor[i].CalibTargetPulses)
+                if (totalPulsesSnapshot >= Sensor[i].CalibTargetPulses)
                 {
                     Calibrando = false;
                     Sensor[i].CalibActive = false;
@@ -98,7 +114,8 @@ void loop()
                     SetPWM(i, 0);
                     Sensor[i].AutoOn = true;
 
-                    Serial.printf("🏁 META ALCANZADA: %ld pulsos.\n", Sensor[i].TotalPulses);
+                    LOG_I("cal", "Meta alcanzada M%d pulsos=%lu",
+                          i, (unsigned long)totalPulsesSnapshot);
                     sendMQTTStatus(i);
                 }
             }
@@ -115,8 +132,9 @@ void loop()
         ReadAnalog();
         SendComm();
 
-        // Manejo de Reinicio pendiente
-        if (ResetTime > 0 && (millis() - ResetTime > 5000))
+        // Reinicio diferido (activado poniendo ResetTime = millis()).
+        // Esperamos RESTART_DELAY_MS para que el cliente HTTP reciba la respuesta.
+        if (ResetTime > 0 && (millis() - ResetTime > quantix::constants::RESTART_DELAY_MS))
         {
             ESP.restart();
         }
@@ -153,32 +171,6 @@ bool WorkPinOn()
 
 uint32_t MedianFromArray(uint32_t buf[], int count)
 {
-    uint32_t Result = 0;
-    if (count > 0)
-    {
-        uint32_t sorted[20];
-        for (int i = 0; i < count; i++)
-            sorted[i] = buf[i];
-
-        for (int i = 1; i < count; i++)
-        {
-            uint32_t key = sorted[i];
-            int j = i - 1;
-            while (j >= 0 && sorted[j] > key)
-            {
-                sorted[j + 1] = sorted[j];
-                j--;
-            }
-            sorted[j + 1] = key;
-        }
-
-        if (count % 2 == 1)
-            Result = sorted[count / 2];
-        else
-        {
-            int mid = count / 2;
-            Result = (sorted[mid - 1] + sorted[mid]) / 2;
-        }
-    }
-    return Result;
+    if (count <= 0) return 0;
+    return quantix::core::medianFromArray(buf, (size_t)count);
 }

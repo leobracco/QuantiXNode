@@ -3,6 +3,8 @@
 #include <PCF8574.h>
 #include "Globals.h"
 #include "Structs.h"
+#include "Constants.h"
+#include "Log.h"
 
 bool RelayStatus[16];
 
@@ -13,7 +15,7 @@ void CheckRelays()
 
     if (WifiMasterOn)
     {
-        if (millis() - WifiSwitchesTimer > 30000)   
+        if (millis() - WifiSwitchesTimer > MDL.WifiTimeoutMs)
         {
             WifiMasterOn = false;
         }
@@ -26,12 +28,30 @@ void CheckRelays()
             }
         }
     }
-    // Timeout de seguridad: Si no hay coms en 4 segundos, apagar todo
-    else if ((millis() - Sensor[0].CommTime < 4000) || (MDL.SensorCount > 1 && (millis() - Sensor[1].CommTime < 4000)))
+    // Timeout de seguridad: si no hay coms dentro de CommTimeoutMs, apagar todo.
+    // Snapshot atómico de CommTime (volatile, puede escribirse desde callback MQTT).
+    else
     {
-        NewLo = RelayLo;
-        NewHi = RelayHi;
+        uint32_t comm0, comm1;
+        noInterrupts();
+        comm0 = Sensor[0].CommTime;
+        comm1 = (MDL.SensorCount > 1) ? Sensor[1].CommTime : 0;
+        interrupts();
+
+        const uint32_t now = millis();
+        bool commRecent0 = (now - comm0 < MDL.CommTimeoutMs);
+        bool commRecent1 = (MDL.SensorCount > 1) && (now - comm1 < MDL.CommTimeoutMs);
+
+        if (commRecent0 || commRecent1)
+        {
+            NewLo = RelayLo;
+            NewHi = RelayHi;
+        }
     }
+
+    // Combinamos los 16 bits de salida (Low[0..7] | High[8..15]) en una palabra
+    // para aplicar una sola vez por driver.
+    const uint16_t relayMask = (uint16_t)NewLo | ((uint16_t)NewHi << 8);
 
     // LOGICA DE HARDWARE
     switch (MDL.RelayControl)
@@ -39,40 +59,42 @@ void CheckRelays()
     case 0: // None
         break;
 
-    case 1: // GPIO
-        for (int i = 0; i < 8; i++)
+    case 1: // GPIO (16 pines)
+        for (int i = 0; i < 16; i++)
         {
-            bool state = bitRead(NewLo, i);
-            // Pines definidos en MDL.RelayControlPins
-            if (MDL.RelayControlPins[i] != NC) {
-                 digitalWrite(MDL.RelayControlPins[i], MDL.InvertRelay ? !state : state);
-            }
+            bool state = (relayMask >> i) & 0x1;
+            if (MDL.RelayControlPins[i] != NC)
+                digitalWrite(MDL.RelayControlPins[i], MDL.InvertRelay ? !state : state);
         }
         break;
 
-    case 5: // PCA9685
-        for (int i = 0; i < 8; i++)
+    case 5: // PCA9685 (16 canales)
+        for (int i = 0; i < 16; i++)
         {
-            bool state = bitRead(NewLo, i);
-            if(RelayStatus[i] != state) {
-                // PCA 0-15
-                if(state) PWMServoDriver.setPWM(i, 4096, 0); // ON
-                else PWMServoDriver.setPWM(i, 0, 4096);      // OFF
+            bool state = (relayMask >> i) & 0x1;
+            if (RelayStatus[i] != state)
+            {
+                bool effective = MDL.InvertRelay ? !state : state;
+                if (effective) PWMServoDriver.setPWM(i, 4096, 0);  // ON
+                else           PWMServoDriver.setPWM(i, 0, 4096);  // OFF
                 RelayStatus[i] = state;
             }
         }
-        // (Lógica similar para NewHi 8-15)
         break;
 
-    case 6: // PCF8574
+    case 6: // PCF8574 (8 pines)
         if (PCF_found)
         {
             for (int i = 0; i < 8; i++)
             {
-                bool state = bitRead(NewLo, i);
+                bool state = (relayMask >> i) & 0x1;
                 PCF.write(i, MDL.InvertRelay ? !state : state);
             }
         }
+        break;
+
+    default:
+        LOG_W("relays", "RelayControl desconocido: %u", (unsigned)MDL.RelayControl);
         break;
     }
 }

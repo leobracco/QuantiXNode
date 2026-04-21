@@ -1,17 +1,16 @@
 #include <Arduino.h>
 #include "Globals.h"
 #include "Structs.h"
+#include "Constants.h"
 
 uint32_t SendLast = 0;
-const uint16_t SendTime = 200; 
 
 void SendComm()
 {
-    if (millis() - SendLast > SendTime)
+    if (millis() - SendLast > quantix::constants::SEND_INTERVAL_MS)
     {
         SendLast = millis();
 
-        // Solo enviamos MQTT
         for (int i = 0; i < MDL.SensorCount; i++) {
             sendMQTTStatus(i);
         }

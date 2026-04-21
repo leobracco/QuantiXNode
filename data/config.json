@@ -6,7 +6,13 @@
     "WorkPin": 255,
     "APpassword": "quantix_admin",
     "InvertFlow": false,
-    "InvertRelay": false
+    "InvertRelay": false,
+    "LogLevel": 2,
+    "HttpUser": "admin",
+    "HttpPass": "",
+    "WatchdogSec": 5,
+    "CommTimeoutMs": 4000,
+    "WifiTimeoutMs": 30000
   },
   "Sensors": [
     {

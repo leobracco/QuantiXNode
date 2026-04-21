@@ -1,0 +1,14 @@
+{
+  "IP0": 192,
+  "IP1": 168,
+  "IP2": 1,
+  "IP3": 100,
+  "SSID": "YOUR_SSID",
+  "Password": "YOUR_PASSWORD",
+  "Mode": false,
+  "mqtt_host": "192.168.1.11",
+  "mqtt_port": 1883,
+  "mqtt_user": "",
+  "mqtt_pass": "",
+  "mqtt_keepalive": 15
+}

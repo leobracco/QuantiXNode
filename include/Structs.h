@@ -26,6 +26,14 @@ struct ModuleConfig {
 
     // Seguridad WiFi
     char APpassword[12];        // Contraseña del Punto de Acceso (Hotspot)
+
+    // --- Configuración operacional (añadido en refactor) ---
+    uint8_t LogLevel;           // 0=ERROR 1=WARN 2=INFO 3=DEBUG (default 2)
+    char HttpUser[16];          // Usuario HTTP Basic Auth para el portal
+    char HttpPass[24];          // Password HTTP Basic Auth
+    uint16_t WatchdogSec;       // Timeout del task watchdog (segundos, default 5)
+    uint16_t CommTimeoutMs;     // Timeout sin coms antes de apagar relés (default 4000)
+    uint16_t WifiTimeoutMs;     // Ventana de control web tras toggle (default 30000)
 };
 
 // --- ESTRUCTURA DE CONFIGURACIÓN DE SENSOR/MOTOR (Sensor[]) ---
@@ -43,7 +51,7 @@ struct SensorConfig {
     float RPM;                  // RPM actuales
     uint16_t PulsesPerRev;      // Pulsos por vuelta (para calcular RPM real)
     
-    bool CalibActive;           // ¿Calibrando?
+    volatile bool CalibActive;  // ¿Calibrando? (modificado desde callback MQTT)
     uint32_t CalibTargetPulses; // Meta de pulsos (ej: 240)
     // --------------------------------
     // Estado y Control
@@ -57,7 +65,7 @@ struct SensorConfig {
     float TargetUPM;            // Setpoint (Objetivo)
     float PWM;                  // Salida actual calculada (0-255)
     float Hz;                   // Frecuencia actual de pulsos
-    uint32_t TotalPulses;       // Acumulador para volumen
+    volatile uint32_t TotalPulses; // Acumulador para volumen (incrementado en GetUPM, leído en loop)
     float MeterCal;             // Calibración (Pulsos por Unidad)
 
     // --- PARÁMETROS PID AVANZADO ---
@@ -86,7 +94,7 @@ struct SensorConfig {
     uint8_t PulseSampleSize;    // Tamaño del buffer de promedio
     
     // Comunicación
-    uint32_t CommTime;          // Timestamp del último paquete recibido
+    volatile uint32_t CommTime; // Timestamp del último paquete recibido (escrito desde callback MQTT)
 };
 
 // --- ESTRUCTURA DE RED (MDLnetwork) ---
@@ -98,9 +106,16 @@ struct ModuleNetwork {
     
     char SSID[24];              // Nombre de la red WiFi a conectar
     char Password[24];          // Contraseña de la red WiFi
-    
+
     bool WifiModeUseStation;    // true = Conectar a Router, false = Crear Hotspot
     uint16_t Identifier;        // Número mágico para validar EEPROM (9876)
+
+    // --- MQTT (añadido en refactor: antes estaba hardcodeado) ---
+    char MqttHost[40];          // IP o hostname del broker MQTT
+    uint16_t MqttPort;          // Puerto MQTT (default 1883)
+    char MqttUser[24];          // Usuario MQTT (vacío = sin auth)
+    char MqttPass[24];          // Password MQTT
+    uint16_t MqttKeepAlive;     // Keep-alive en segundos (default 15)
 };
 
 #endif

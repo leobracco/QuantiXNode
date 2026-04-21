@@ -2,15 +2,17 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
-#include "Globals.h" // Importante para acceder a MDL y Sensor
+#include "Globals.h"
+#include "Constants.h"
+#include "Log.h"
 
 // Cliente MQTT
 WiFiClient mqttEspClient;
 PubSubClient mqttClient(mqttEspClient);
 
-// Variables de tiempo para reconexión
+// Variables de tiempo para reconexión (con backoff exponencial)
 unsigned long lastMqttReconnectAttempt = 0;
-const long mqttReconnectInterval = 5000;
+uint32_t mqttReconnectBackoff = quantix::constants::MQTT_RECONNECT_BASE_MS;
 
 // Identidad Única
 char uid[13];
@@ -22,193 +24,269 @@ void obtenerUID()
 {
     uint64_t mac = ESP.getEfuseMac();
     snprintf(uid, sizeof(uid), "%04X%08X", (uint16_t)(mac >> 32), (uint32_t)mac);
-    Serial.printf("🆔 UID del Dispositivo: %s\n", uid);
+    LOG_I("mqtt", "UID=%s", uid);
 }
 
-void mqttCallback(char *topic, byte *payload, unsigned int length)
+namespace {
+
+// Valida y extrae un `id` del documento (rango [0, SensorCount)).
+bool extractSensorId(const JsonDocument& doc, const char* key, uint8_t& outId)
 {
-    String t = String(topic);
-    StaticJsonDocument<2048> doc;
+    if (!doc.containsKey(key)) return false;
+    int raw = doc[key].as<int>();
+    if (raw < 0 || raw >= (int)MDL.SensorCount) return false;
+    outId = (uint8_t)raw;
+    return true;
+}
+
+void handleConfigMsg(JsonDocument& doc)
+{
+    if (!doc.containsKey("configs")) return;
+    JsonArray configs = doc["configs"];
+    for (JsonObject c : configs)
+    {
+        int raw = c["idx"] | -1;
+        if (raw < 0 || raw >= (int)MDL.SensorCount) {
+            LOG_W("mqtt", "config: idx fuera de rango (%d)", raw);
+            continue;
+        }
+        uint8_t id = (uint8_t)raw;
+
+        JsonObject pid = c["config_pid"];
+        if (!pid.isNull())
+        {
+            Sensor[id].Kp = pid["kp"] | Sensor[id].Kp;
+            Sensor[id].Ki = pid["ki"] | Sensor[id].Ki;
+            Sensor[id].Kd = pid["kd"] | Sensor[id].Kd;
+        }
+        JsonObject cal = c["calibracion"];
+        if (!cal.isNull())
+        {
+            int pwmMin = cal["pwm_min"] | 40;
+            int pwmMax = cal["pwm_max"] | (int)quantix::constants::PWM_MAX;
+            pwmMin = constrain(pwmMin, 0, (int)quantix::constants::PWM_MAX);
+            pwmMax = constrain(pwmMax, pwmMin, (int)quantix::constants::PWM_MAX);
+            Sensor[id].MinPWM = (uint16_t)pwmMin;
+            Sensor[id].MaxPWM = (uint16_t)pwmMax;
+        }
+        Sensor[id].MeterCal = c["meter_cal"] | Sensor[id].MeterCal;
+        ResetPIDState(id);
+    }
+    SaveData();
+}
+
+void handleTargetMsg(JsonDocument& doc)
+{
+    uint8_t id;
+    if (!extractSensorId(doc, "id", id)) {
+        LOG_W("mqtt", "target: id inválido");
+        return;
+    }
+    float pps = doc["pps"] | 0.0f;
+    bool seccionOn = doc["seccion_on"] | false;
+
+    if (pps < 0.0f) {
+        LOG_W("mqtt", "target: pps negativo rechazado (%.2f)", pps);
+        return;
+    }
+
+    Sensor[id].TargetUPM = seccionOn ? pps : 0.0f;
+    Sensor[id].FlowEnabled = seccionOn;
+    Sensor[id].CommTime = millis();
+}
+
+void handleTestMsg(JsonDocument& doc)
+{
+    uint8_t id;
+    if (!extractSensorId(doc, "id", id)) {
+        LOG_W("mqtt", "test: id inválido");
+        return;
+    }
+    const char* cmd = doc["cmd"] | "stop";
+    int pwmVal = doc["pwm"] | 0;
+
+    if (pwmVal < 0 || pwmVal > (int)quantix::constants::PWM_MAX) {
+        LOG_W("mqtt", "test: pwm fuera de rango (%d)", pwmVal);
+        return;
+    }
+
+    if (strcmp(cmd, "start") == 0)
+    {
+        Sensor[id].AutoOn = false;
+        Sensor[id].ManualAdjust = pwmVal;
+        SetPWM(id, pwmVal);
+    }
+    else
+    {
+        Sensor[id].AutoOn = true;
+        SetPWM(id, 0);
+    }
+    Sensor[id].CommTime = millis();
+}
+
+void handleCalMsg(JsonDocument& doc)
+{
+    uint8_t id;
+    if (!extractSensorId(doc, "id", id)) {
+        LOG_W("mqtt", "cal: id inválido");
+        return;
+    }
+    long pulsosMeta = doc["pulsos"] | 0;
+    int pwmVal = doc["pwm"] | 1000;
+    const char* cmd = doc["cmd"] | "stop";
+
+    if (pwmVal < 0 || pwmVal > (int)quantix::constants::PWM_MAX) {
+        LOG_W("mqtt", "cal: pwm fuera de rango (%d)", pwmVal);
+        return;
+    }
+
+    if (strcmp(cmd, "start") == 0 && pulsosMeta > 0)
+    {
+        Sensor[id].CalibActive = false;
+
+        noInterrupts();
+        Sensor[id].TotalPulses = 0;
+        interrupts();
+
+        Sensor[id].CalibTargetPulses = (uint32_t)pulsosMeta;
+        Sensor[id].ManualAdjust = pwmVal;
+        Sensor[id].AutoOn = false;
+
+        SetPWM(id, pwmVal);
+        Sensor[id].CalibActive = true;
+
+        LOG_I("cal", "Start M%u meta=%ld pwm=%d", (unsigned)id, pulsosMeta, pwmVal);
+    }
+    else
+    {
+        Sensor[id].CalibActive = false;
+        Sensor[id].ManualAdjust = 0;
+        Sensor[id].AutoOn = true;
+        SetPWM(id, 0);
+    }
+    Sensor[id].CommTime = millis();
+}
+
+}  // namespace
+
+void mqttCallback(char* topic, byte* payload, unsigned int length)
+{
+    StaticJsonDocument<quantix::constants::JSON_CONFIG_DOC_SIZE> doc;
     DeserializationError error = deserializeJson(doc, payload, length);
 
     if (error)
     {
-        Serial.print(F("❌ Error JSON: "));
-        Serial.println(error.f_str());
+        LOG_W("mqtt", "JSON inválido: %s", error.c_str());
         return;
     }
 
-    // --- A. PROCESAR CONFIGURACIÓN ---
-    if (t == String(topicConfig))
-    {
-        if (doc.containsKey("configs"))
-        {
-            JsonArray configs = doc["configs"];
-            for (JsonObject c : configs)
-            {
-                int id = c["idx"] | 0;
-                if (id < MDL.SensorCount)
-                {
-                    JsonObject pid = c["config_pid"];
-                    if (!pid.isNull())
-                    {
-                        Sensor[id].Kp = pid["kp"] | Sensor[id].Kp;
-                        Sensor[id].Ki = pid["ki"] | Sensor[id].Ki;
-                        Sensor[id].Kd = pid["kd"] | Sensor[id].Kd;
-                    }
-                    JsonObject cal = c["calibracion"];
-                    if (!cal.isNull())
-                    {
-                        Sensor[id].MinPWM = cal["pwm_min"] | 40;
-                        Sensor[id].MaxPWM = cal["pwm_max"] | 255;
-                    }
-                    Sensor[id].MeterCal = c["meter_cal"] | Sensor[id].MeterCal;
-                    ResetPIDState(id);
-                }
-            }
-            SaveData();
-        }
-    }
-
-    // --- B. PROCESAR TARGET (Dosis en tiempo real) ---
-    else if (t == String(topicTarget))
-    {
-        int id = doc["id"] | 0;
-        if (id < MDL.SensorCount)
-        {
-            float pps = doc["pps"] | 0.0f;
-            bool seccionOn = doc["seccion_on"] | false;
-            Sensor[id].TargetUPM = seccionOn ? pps : 0.0f;
-            Sensor[id].FlowEnabled = seccionOn;
-        }
-    }
-
-    // --- C. PROCESAR TEST (Slider web) ---
-    else if (t == String(topicTest))
-    {
-        const char *cmd = doc["cmd"] | "stop";
-        int id = doc["id"] | 0;
-        int pwmVal = doc["pwm"] | 0;
-        if (id < MDL.SensorCount)
-        {
-            if (strcmp(cmd, "start") == 0)
-            {
-                Sensor[id].AutoOn = false;
-                Sensor[id].ManualAdjust = pwmVal;
-                SetPWM(id, pwmVal);
-            }
-            else
-            {
-                Sensor[id].AutoOn = true;
-                SetPWM(id, 0);
-            }
-        }
-    }
-
-    // --- D. PROCESAR CALIBRACIÓN (Muestra controlada) ---
-    // --- D. PROCESAR CALIBRACIÓN ---
-    // --- D. PROCESAR CALIBRACIÓN (Con memoria de PWM) ---
-    else if (t == String(topicCal))
-    {
-        int id = doc["id"] | 0;
-        long pulsosMeta = doc["pulsos"] | 0;
-        int pwmVal = doc["pwm"] | 1000; // Recibimos el PWM de la web
-        const char *cmd = doc["cmd"] | "stop";
-
-        if (id < MDL.SensorCount)
-        {
-            if (strcmp(cmd, "start") == 0 && pulsosMeta > 0)
-            {
-                Sensor[id].CalibActive = false;
-
-                noInterrupts();
-                Sensor[id].TotalPulses = 0;
-                interrupts();
-
-                Sensor[id].CalibTargetPulses = pulsosMeta;
-                Sensor[id].ManualAdjust = pwmVal; // <--- GUARDAMOS EL PWM AQUÍ
-                Sensor[id].AutoOn = false;
-
-                SetPWM(id, pwmVal);
-                Sensor[id].CalibActive = true;
-
-                Serial.printf("⚖️ START: M%d, Meta %ld, PWM %d\n", id, pulsosMeta, pwmVal);
-            }
-            else
-            {
-                Sensor[id].CalibActive = false;
-                Sensor[id].ManualAdjust = 0;
-                Sensor[id].AutoOn = true;
-                SetPWM(id, 0);
-            }
-        }
-    }
+    if (strcmp(topic, topicConfig) == 0)       handleConfigMsg(doc);
+    else if (strcmp(topic, topicTarget) == 0)  handleTargetMsg(doc);
+    else if (strcmp(topic, topicTest) == 0)    handleTestMsg(doc);
+    else if (strcmp(topic, topicCal) == 0)     handleCalMsg(doc);
+    else LOG_D("mqtt", "Topic ignorado: %s", topic);
 }
 void initMQTT()
 {
     obtenerUID();
 
-    // Configuramos los tópicos basados en el UID físico
-    sprintf(topicStatus, "agp/quantix/%s/status_live", uid);
-    sprintf(topicTarget, "agp/quantix/%s/target", uid);
-    sprintf(topicConfig, "agp/quantix/%s/config", uid);
-    sprintf(topicCmd, "agp/quantix/%s/cmd", uid);
-    sprintf(topicTest, "agp/quantix/%s/test", uid);
-    sprintf(topicCal, "agp/quantix/%s/cal", uid);
+    // Tópicos basados en el UID físico.
+    snprintf(topicStatus, sizeof(topicStatus), "agp/quantix/%s/status_live", uid);
+    snprintf(topicTarget, sizeof(topicTarget), "agp/quantix/%s/target", uid);
+    snprintf(topicConfig, sizeof(topicConfig), "agp/quantix/%s/config", uid);
+    snprintf(topicCmd,    sizeof(topicCmd),    "agp/quantix/%s/cmd",    uid);
+    snprintf(topicTest,   sizeof(topicTest),   "agp/quantix/%s/test",   uid);
+    snprintf(topicCal,    sizeof(topicCal),    "agp/quantix/%s/cal",    uid);
 
-    // AJUSTA LA IP AQUÍ A LA DE TU SERVIDOR/PC
     mqttClient.setBufferSize(2048);
-    mqttClient.setServer(IPAddress(192, 168, 1, 11), 1883);
+    mqttClient.setKeepAlive(MDLnetwork.MqttKeepAlive);
+
+    // Preferimos IP numérica si el host parsea como tal; si no, pasamos el
+    // hostname a setServer para que PubSubClient haga resolución DNS.
+    IPAddress ip;
+    if (ip.fromString(MDLnetwork.MqttHost))
+    {
+        mqttClient.setServer(ip, MDLnetwork.MqttPort);
+        LOG_I("mqtt", "Broker %s:%u (IP)", MDLnetwork.MqttHost, MDLnetwork.MqttPort);
+    }
+    else if (strlen(MDLnetwork.MqttHost) > 0)
+    {
+        mqttClient.setServer(MDLnetwork.MqttHost, MDLnetwork.MqttPort);
+        LOG_I("mqtt", "Broker %s:%u (hostname)", MDLnetwork.MqttHost, MDLnetwork.MqttPort);
+    }
+    else
+    {
+        LOG_W("mqtt", "Host MQTT no configurado, MQTT deshabilitado");
+    }
     mqttClient.setCallback(mqttCallback);
 }
 
 boolean mqttReconnect()
 {
-    if (mqttClient.connect(uid))
+    bool ok;
+    if (strlen(MDLnetwork.MqttUser) > 0)
+        ok = mqttClient.connect(uid, MDLnetwork.MqttUser, MDLnetwork.MqttPass);
+    else
+        ok = mqttClient.connect(uid);
+
+    if (!ok)
     {
-        Serial.println(F("✅ MQTT Conectado"));
-
-        mqttClient.subscribe(topicConfig);
-        mqttClient.subscribe(topicTarget);
-        mqttClient.subscribe(topicCmd);
-        mqttClient.subscribe(topicTest);
-        mqttClient.subscribe(topicCal);
-
-        // ANUNCIO
-        StaticJsonDocument<200> ann;
-        ann["uid"] = uid;
-        ann["ip"] = WiFi.localIP().toString();
-        ann["type"] = "MOTOR";
-
-        char buffer[200];
-        serializeJson(ann, buffer);
-        mqttClient.publish("agp/quantix/announcement", buffer);
-
-        return true;
+        LOG_W("mqtt", "Reconexión falló, state=%d", mqttClient.state());
+        return false;
     }
-    return false;
+
+    LOG_I("mqtt", "Conectado");
+
+    mqttClient.subscribe(topicConfig);
+    mqttClient.subscribe(topicTarget);
+    mqttClient.subscribe(topicCmd);
+    mqttClient.subscribe(topicTest);
+    mqttClient.subscribe(topicCal);
+
+    // Announce: IP actual para que el gateway lo registre.
+    StaticJsonDocument<quantix::constants::JSON_ANNOUNCE_DOC_SIZE> ann;
+    ann["uid"] = uid;
+    ann["ip"] = WiFi.localIP().toString();
+    ann["type"] = "MOTOR";
+
+    char buffer[quantix::constants::JSON_ANNOUNCE_DOC_SIZE];
+    size_t len = serializeJson(ann, buffer, sizeof(buffer));
+    mqttClient.publish("agp/quantix/announcement", buffer, len);
+
+    return true;
 }
 
 void mqttLoop()
 {
-    if (WiFi.status() == WL_CONNECTED)
+    if (WiFi.status() != WL_CONNECTED)
+        return;
+
+    // Sin host configurado no intentamos reconectar (evita spam de errores DNS).
+    if (strlen(MDLnetwork.MqttHost) == 0)
+        return;
+
+    if (!mqttClient.connected())
     {
-        if (!mqttClient.connected())
+        unsigned long now = millis();
+        if (now - lastMqttReconnectAttempt > mqttReconnectBackoff)
         {
-            unsigned long now = millis();
-            if (now - lastMqttReconnectAttempt > mqttReconnectInterval)
+            lastMqttReconnectAttempt = now;
+            if (mqttReconnect())
             {
-                lastMqttReconnectAttempt = now;
-                if (mqttReconnect())
-                {
-                    lastMqttReconnectAttempt = 0;
-                }
+                mqttReconnectBackoff = quantix::constants::MQTT_RECONNECT_BASE_MS;
+            }
+            else
+            {
+                // Backoff exponencial con tope.
+                mqttReconnectBackoff = mqttReconnectBackoff * 2;
+                if (mqttReconnectBackoff > quantix::constants::MQTT_RECONNECT_CAP_MS)
+                    mqttReconnectBackoff = quantix::constants::MQTT_RECONNECT_CAP_MS;
             }
         }
-        else
-        {
-            mqttClient.loop();
-        }
+    }
+    else
+    {
+        mqttClient.loop();
     }
 }
 
@@ -216,16 +294,23 @@ void sendMQTTStatus(byte ID)
 {
     if (!mqttClient.connected())
         return;
+    if (ID >= MDL.SensorCount)
+        return;
 
-    StaticJsonDocument<350> doc; // Aumentamos un poco el tamaño por seguridad
+    StaticJsonDocument<quantix::constants::JSON_STATUS_DOC_SIZE> doc;
 
     doc["uid"] = uid;
-    doc["id"] = ID; // 0 o 1 interno de la placa
+    doc["id"] = ID;
     doc["id_placa"] = MDL.ID;
 
-    // Datos de tiempo real
+    // Datos de tiempo real (snapshot atómico de campos volatile)
+    noInterrupts();
+    uint32_t totalPulsesSnapshot = Sensor[ID].TotalPulses;
+    bool calibActiveSnapshot = Sensor[ID].CalibActive;
+    interrupts();
+
     doc["rpm"] = (int)Sensor[ID].RPM;
-    doc["pulsos"] = Sensor[ID].TotalPulses;
+    doc["pulsos"] = (uint32_t)totalPulsesSnapshot;
     doc["pwm"] = (int)Sensor[ID].PWM;
 
     // --- DATOS CLAVE PARA DOSIS REAL ---
@@ -234,15 +319,15 @@ void sendMQTTStatus(byte ID)
     doc["meter_cal"] = Sensor[ID].MeterCal;   // Enviamos su propia constante de calibración
     // ------------------------------------
 
-    if (Sensor[ID].CalibActive)
+    if (calibActiveSnapshot)
         doc["calibrando"] = true;
 
-    float load = (Sensor[ID].PWM / 4095.0f) * 100.0f;
-    if (load > 100)
-        load = 100;
+    float load = (Sensor[ID].PWM / (float)quantix::constants::PWM_MAX) * 100.0f;
+    if (load > 100) load = 100;
+    if (load < 0)   load = 0;
     doc["load_pct"] = (int)load;
 
-    char buffer[350];
-    serializeJson(doc, buffer);
-    mqttClient.publish(topicStatus, buffer);
+    char buffer[quantix::constants::JSON_STATUS_BUF_SIZE];
+    size_t len = serializeJson(doc, buffer, sizeof(buffer));
+    mqttClient.publish(topicStatus, buffer, len);
 }

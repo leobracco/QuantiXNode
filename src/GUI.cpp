@@ -2,9 +2,23 @@
 #include <WebServer.h>
 #include "Globals.h"
 #include "Structs.h"
+#include "Constants.h"
+#include "Log.h"
 
-// --- VARIABLES EXTERNAS ---
 extern WebServer server;
+
+namespace {
+// Auth HTTP Basic reutilizada por todos los handlers del portal.
+bool requireAuth()
+{
+    if (!server.authenticate(MDL.HttpUser, MDL.HttpPass))
+    {
+        server.requestAuthentication();
+        return false;
+    }
+    return true;
+}
+}  // namespace
 
 // --- PROTOTIPOS DE FUNCIONES EXTERNAS ---
 // Estas funciones están definidas en PgStart.cpp, PgSwitches.cpp y PgNetwork.cpp
@@ -20,7 +34,8 @@ void handleCredentials();
 
 void HandleRoot()
 {
-    // Si se envían datos (prop1), procesar credenciales, sino mostrar inicio
+    if (!requireAuth()) return;
+
     if (server.hasArg("prop1"))
     {
         handleCredentials();
@@ -33,13 +48,13 @@ void HandleRoot()
 
 void HandlePage1()
 {
-    // Mostrar página de configuración de Switches/Sensores
+    if (!requireAuth()) return;
     server.send(200, "text/html", GetPage1());
 }
 
 void HandlePage2()
 {
-    // Mostrar página de configuración de Red
+    if (!requireAuth()) return;
     server.send(200, "text/html", GetPage2());
 }
 
@@ -106,11 +121,12 @@ void handleCredentials()
         SaveData();     // Función en Begin.cpp
     }
 
-    // 5. Reiniciar si es necesario para aplicar cambios de red
+    // 5. Reinicio diferido: el loop principal llama a ESP.restart() cuando
+    //    pasa `PENDING_RESTART_MS` desde `ResetTime`. Así el navegador recibe
+    //    la respuesta y no bloqueamos el task actual.
     if (stationChanged || apChanged)
     {
-        // Pequeño delay para asegurar que el navegador reciba la página HTML antes de morir
-        delay(500); 
-        ESP.restart();
+        ResetTime = millis();
+        LOG_I("web", "Credenciales actualizadas, reinicio diferido");
     }
 }
