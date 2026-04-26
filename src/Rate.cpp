@@ -2,101 +2,98 @@
 #include "Globals.h"
 #include "Structs.h"
 
-// --- CONFIGURACIÓN DE FILTRO ---
-#define MIN_PULSE_MICROS 250
+// --- FILTRO ANTI-REBOTE ---
+// Período mínimo entre pulsos en microsegundos.
+// Inductivo 24 PPR a 350 RPM = 140 Hz → período 7142µs
+// Filtro 2000µs = seguro hasta 500 Hz (24 PPR a 1250 RPM)
+// Se cachea desde Sensor[].PulseMin al inicio para no leer struct en ISR.
+static volatile uint32_t CachedPulseMin[MaxProductCount] = {2000, 2000};
 
-// Variables
+// Variables de estado
 uint32_t LastPulse[MaxProductCount];
-uint32_t ReadLast[MaxProductCount];
-uint32_t PulseTime[MaxProductCount];
-
-// Buffers
-volatile uint32_t Samples[MaxProductCount][MaxSampleSize];
+volatile uint32_t ReadLast[MaxProductCount];
+volatile uint32_t PulseTime[MaxProductCount];
 volatile uint16_t PulseCount[MaxProductCount];
-volatile uint8_t SamplesCount[MaxProductCount];
-volatile uint8_t SamplesIndex[MaxProductCount];
-
-// Variable Debug
 volatile uint32_t TotalInterrupts[2] = {0, 0};
 
-// --- INTERRUPCIÓN (ISR) BLINDADA ---
-IRAM_ATTR void PulseISR(uint8_t ID)
+// Cachear el filtro desde la config (llamar después de LoadData)
+void CachePulseFilter()
 {
-    TotalInterrupts[ID]++;
-
-    uint32_t ReadTime = micros();
-    uint32_t delta = ReadTime - ReadLast[ID];
-
-    if (delta > MIN_PULSE_MICROS)
+    for (int i = 0; i < MaxProductCount; i++)
     {
-        PulseTime[ID] = delta;
-        ReadLast[ID] = ReadTime;
-
-        PulseCount[ID]++;
-
-        // --- PROTECCIÓN CONTRA DIVISIÓN POR CERO ---
-        // Recuperamos el tamaño de muestra configurado
-        uint8_t size = Sensor[ID].PulseSampleSize;
-
-        // Si es 0 o mayor al máximo permitido, forzamos un valor seguro (5)
-        // Esto evita el CRASH inmediato si la config está mal.
-        if (size == 0 || size > MaxSampleSize)
-            size = 5;
-
-        Samples[ID][SamplesIndex[ID]] = PulseTime[ID];
-
-        // Ahora es seguro usar el operador módulo (%)
-        SamplesIndex[ID] = (SamplesIndex[ID] + 1) % size;
-
-        if (SamplesCount[ID] < size)
-            SamplesCount[ID]++;
+        uint32_t val = Sensor[i].PulseMin;
+        CachedPulseMin[i] = (val > 0 && val < 1000000) ? val : 2000;
+        Serial.printf("[Rate] M%d PulseMin=%lu µs\n", i, CachedPulseMin[i]);
     }
 }
 
-// Wrappers
+// --- ISR: lo más corto posible, solo variables volátiles ---
+IRAM_ATTR void PulseISR(uint8_t ID)
+{
+    uint32_t now = micros();
+    uint32_t delta = now - ReadLast[ID];
+
+    TotalInterrupts[ID]++;
+
+    if (delta >= CachedPulseMin[ID])
+    {
+        PulseTime[ID] = delta;
+        ReadLast[ID] = now;
+        PulseCount[ID]++;
+    }
+}
+
 void IRAM_ATTR ISR_Sensor0() { PulseISR(0); }
 void IRAM_ATTR ISR_Sensor1() { PulseISR(1); }
 
-// --- CÁLCULO ---
+// --- CÁLCULO: filtro exponencial + conteo de pulsos ---
 void GetUPM()
 {
     for (int i = 0; i < MDL.SensorCount; i++)
     {
-        if (PulseCount[i] > 0)
+        // Leer atómicamente los valores de la ISR
+        noInterrupts();
+        uint16_t count = PulseCount[i];
+        PulseCount[i] = 0;
+        uint32_t period = PulseTime[i];
+        interrupts();
+
+        if (count > 0)
         {
             LastPulse[i] = millis();
-            noInterrupts();
-            Sensor[i].TotalPulses += PulseCount[i];
-            PulseCount[i] = 0;
-            uint16_t count = SamplesCount[i];
-            uint32_t Snapshot[MaxSampleSize];
-            for (uint16_t k = 0; k < count; k++)
-                Snapshot[k] = Samples[i][k];
-            interrupts();
+            Sensor[i].TotalPulses += count;
 
-            uint32_t median = MedianFromArray(Snapshot, count);
-
-            if (median > 0)
+            if (period > 0)
             {
-                // Hz = Pulsos por Segundo reales
-                Sensor[i].Hz = 1000000.0f / (float)median;
+                // Hz desde el período entre pulsos (más preciso que contar en ventana)
+                float hzNew = 1000000.0f / (float)period;
 
-                // CRÍTICO: El PID debe usar Hz (Pulsos/seg) para comparar con el Target del Bridge
+                // Filtro exponencial (EMA)
+                float alpha = Sensor[i].Alpha;
+                if (alpha <= 0.0f || alpha > 1.0f)
+                    alpha = (Sensor[i].MotorType == MOTOR_HYDRAULIC) ? 0.2f : 0.4f;
+
+                // Primera lectura: sin filtro
+                if (Sensor[i].Hz < 0.01f)
+                    Sensor[i].Hz = hzNew;
+                else
+                    Sensor[i].Hz = alpha * hzNew + (1.0f - alpha) * Sensor[i].Hz;
+
                 Sensor[i].UPM = Sensor[i].Hz;
 
-                // RPM es solo para visualización
+                // RPM para display
                 if (Sensor[i].PulsesPerRev > 0)
                     Sensor[i].RPM = (Sensor[i].Hz * 60.0f) / (float)Sensor[i].PulsesPerRev;
             }
         }
 
-        // Timeout: Si no hay pulsos, todo a cero
-        if (millis() - LastPulse[i] > 2000)
+        // Timeout
+        uint32_t timeout = (Sensor[i].MotorType == MOTOR_HYDRAULIC) ? 1000 : 500;
+        if (millis() - LastPulse[i] > timeout)
         {
             Sensor[i].UPM = 0;
             Sensor[i].Hz = 0;
             Sensor[i].RPM = 0;
-            SamplesCount[i] = 0;
         }
     }
 }

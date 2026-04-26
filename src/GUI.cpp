@@ -33,7 +33,24 @@ void HandleRoot()
 
 void HandlePage1()
 {
-    // Mostrar página de configuración de Switches/Sensores
+    // Si viene POST, guardar datos de motores
+    if (server.method() == HTTP_POST)
+    {
+        for (int i = 0; i < MDL.SensorCount; i++)
+        {
+            String si = String(i);
+            if (server.hasArg("kp" + si))  Sensor[i].Kp = server.arg("kp" + si).toFloat();
+            if (server.hasArg("ki" + si))  Sensor[i].Ki = server.arg("ki" + si).toFloat();
+            if (server.hasArg("pmin" + si)) Sensor[i].MinPWM = server.arg("pmin" + si).toInt();
+            if (server.hasArg("pmax" + si)) Sensor[i].MaxPWM = server.arg("pmax" + si).toInt();
+            if (server.hasArg("mcal" + si)) Sensor[i].MeterCal = server.arg("mcal" + si).toFloat();
+            if (server.hasArg("db" + si))   Sensor[i].Deadband = server.arg("db" + si).toInt();
+            if (server.hasArg("sr" + si))   Sensor[i].SlewRate = server.arg("sr" + si).toInt();
+            ResetPIDState(i);
+        }
+        SaveData();
+        Serial.println("✅ Config motores guardada desde web");
+    }
     server.send(200, "text/html", GetPage1());
 }
 

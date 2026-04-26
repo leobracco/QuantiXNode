@@ -20,8 +20,8 @@ extern PCF8574 PCF;
 extern WebServer server;
 
 // VARIABLES DE ESTADO
-extern bool RelayLo;
-extern bool RelayHi;
+extern uint8_t RelayLo;
+extern uint8_t RelayHi;
 extern bool WifiMasterOn;
 extern uint32_t WifiSwitchesTimer;
 extern bool Button[16]; 
@@ -44,11 +44,13 @@ bool CheckPins();
 void PIDmotor(byte ID);
 void AdjustFlow();
 void SetPWM(byte ID, float pwmVal = 0); 
-void GetUPM();      
+void GetUPM();
+void CachePulseFilter();      
 void GetSpeed();   
 void ResetPIDState(byte ID); 
 void IRAM_ATTR ISR_Sensor0();
 void IRAM_ATTR ISR_Sensor1();
+extern volatile uint32_t TotalInterrupts[2];
 void SendComm();
 void initMQTT();
 void CheckCalibration();

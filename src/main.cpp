@@ -18,13 +18,14 @@ ModuleConfig MDL;
 SensorConfig Sensor[MaxProductCount];
 ModuleNetwork MDLnetwork;
 
-Adafruit_PWMServoDriver PWMServoDriver = Adafruit_PWMServoDriver();
+// RC15 PCB: PCA9685 address 0x55 (A5-A0 = 1010101)
+Adafruit_PWMServoDriver PWMServoDriver = Adafruit_PWMServoDriver(0x55);
 PCF8574 PCF(0x20);
 WebServer server(80);
 
 // --- VARIABLES DE ESTADO ---
-bool RelayLo = false;
-bool RelayHi = false;
+uint8_t RelayLo = 0;
+uint8_t RelayHi = 0;
 bool WifiMasterOn = false;
 uint32_t WifiSwitchesTimer = 0;
 bool Button[16];
@@ -106,6 +107,20 @@ void loop()
             {
                 // ELIMINADO: AdjustFlow(); <-- Esto rompía todo el I2C
                 PIDmotor(i); // El PID ahora es autosuficiente
+            }
+        }
+
+        // Diagnóstico cada 2 seg
+        static uint32_t lastDiag = 0;
+        if (millis() - lastDiag >= 2000)
+        {
+            lastDiag = millis();
+            for (int d = 0; d < MDL.SensorCount; d++)
+            {
+                Serial.printf("[DIAG M%d] ISR:%lu Filtrados:%lu Hz:%.1f RPM:%.0f PWM:%.0f PulseMin:%lu PPR:%d\n",
+                    d, TotalInterrupts[d], Sensor[d].TotalPulses,
+                    Sensor[d].Hz, Sensor[d].RPM, Sensor[d].PWM,
+                    Sensor[d].PulseMin, Sensor[d].PulsesPerRev);
             }
         }
 
