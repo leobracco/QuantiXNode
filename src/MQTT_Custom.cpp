@@ -120,6 +120,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                 }
             }
             SaveData();
+            CachePulseFilter(); // Actualizar filtro ISR si cambió PulseMin
         }
     }
 
@@ -196,6 +197,11 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
         const char *cmd = doc["cmd"] | "stop";
         int id = doc["id"] | 0;
         int pwmVal = doc["pwm"] | 0;
+        // Validar PWM: hidráulico no puede invertir
+        if (Sensor[id].MotorType == MOTOR_HYDRAULIC)
+            pwmVal = constrain(pwmVal, 0, 4095);
+        else
+            pwmVal = constrain(pwmVal, -4095, 4095);
         if (id < MDL.SensorCount)
         {
             if (strcmp(cmd, "start") == 0)
@@ -212,14 +218,12 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
         }
     }
 
-    // --- D. PROCESAR CALIBRACIÓN (Muestra controlada) ---
     // --- D. PROCESAR CALIBRACIÓN ---
-    // --- D. PROCESAR CALIBRACIÓN (Con memoria de PWM) ---
     else if (t == String(topicCal))
     {
         int id = doc["id"] | 0;
         long pulsosMeta = doc["pulsos"] | 0;
-        int pwmVal = doc["pwm"] | 1000; // Recibimos el PWM de la web
+        int pwmVal = constrain(doc["pwm"] | 1000, 0, 4095);
         const char *cmd = doc["cmd"] | "stop";
 
         if (id < MDL.SensorCount)
@@ -227,10 +231,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
             if (strcmp(cmd, "start") == 0 && pulsosMeta > 0)
             {
                 Sensor[id].CalibActive = false;
-
-                noInterrupts();
-                Sensor[id].TotalPulses = 0;
-                interrupts();
+                ResetPulseCounters(id); // Reset limpio de ISR + TotalPulses
 
                 Sensor[id].CalibTargetPulses = pulsosMeta;
                 Sensor[id].ManualAdjust = pwmVal; // <--- GUARDAMOS EL PWM AQUÍ

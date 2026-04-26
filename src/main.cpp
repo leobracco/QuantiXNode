@@ -58,8 +58,8 @@ void setup()
     }
 
     DoSetup();
-    initMQTT();
-    Serial.println(F("--- QUANTIX ARRANCADO (SOLO MQTT) ---"));
+    // initMQTT() ya se llama dentro de DoSetup()
+    Serial.println(F("--- QUANTIX ARRANCADO ---"));
 }
 
 void loop()
@@ -77,8 +77,25 @@ void loop()
         GetUPM();
         GetSpeed();
 
-        // 3. Lógica de Motores
-        for (int i = 0; i < MDL.SensorCount; i++)
+        // 3. Watchdog: corte de motor si se pierde comunicación MQTT
+        for (int i = 0; i < MDL.SensorCount && i < MaxProductCount; i++)
+        {
+            if (!Sensor[i].CalibActive &&
+                Sensor[i].FlowEnabled &&
+                millis() - Sensor[i].CommTime > 3000)
+            {
+                Sensor[i].FlowEnabled = false;
+                Sensor[i].TargetUPM = 0;
+                Sensor[i].PWM = 0;
+                Sensor[i].AutoOn = true;
+                SetPWM(i, 0);
+                ResetPIDState(i);
+                Serial.printf("⛔ WATCHDOG M%d: sin comunicación >3s, motor OFF\n", i);
+            }
+        }
+
+        // 4. Lógica de Motores
+        for (int i = 0; i < MDL.SensorCount && i < MaxProductCount; i++)
         {
             if (Sensor[i].CalibActive == true)
             {

@@ -111,19 +111,23 @@ void DoSetup() {
         if (Sensor[i].DirPin != NC) pinMode(Sensor[i].DirPin, OUTPUT);
         if (Sensor[i].PWMPin != NC) pinMode(Sensor[i].PWMPin, OUTPUT);
 
-        // C. Configurar Canales PWM (LEDC) para el ESP32
-        // ESTO FALTABA Y ES CRÍTICO PARA QUE EL MOTOR GIRE
-        uint8_t ch1 = i * 2;     
-        uint8_t ch2 = i * 2 + 1; 
+        // C. Configurar Canales PWM (LEDC) — frecuencia adaptativa por tipo motor
+        uint8_t ch1 = i * 2;
+        uint8_t ch2 = i * 2 + 1;
+        uint16_t pwmFreq = 1000; // Eléctrico: 1000 Hz
+        if (Sensor[i].MotorType == MOTOR_HYDRAULIC) {
+            pwmFreq = Sensor[i].HydPWMFreq > 0 ? Sensor[i].HydPWMFreq : 150;
+        }
 
         if (Sensor[i].IN1 != NC) {
-            ledcSetup(ch1, 1000, 12); // 1000 Hz, 8 bit
-            ledcAttachPin(Sensor[i].IN1, ch1); 
+            ledcSetup(ch1, pwmFreq, 12); // 12 bit = duty 0-4095
+            ledcAttachPin(Sensor[i].IN1, ch1);
         }
         if (Sensor[i].IN2 != NC) {
-            ledcSetup(ch2, 1000, 12);
+            ledcSetup(ch2, pwmFreq, 12);
             ledcAttachPin(Sensor[i].IN2, ch2);
         }
+        Serial.printf("  M%d PWM freq=%d Hz, 12-bit\n", i, pwmFreq);
 
         // D. Apagar motor por seguridad
         SetPWM(i, 0);
@@ -270,7 +274,7 @@ void LoadData()
     }
 
     MDL.ID = doc["MDL"]["ID"] | 1;
-    MDL.SensorCount = doc["MDL"]["SensorCount"] | 2; // Default a 2 si falla
+    MDL.SensorCount = constrain(doc["MDL"]["SensorCount"] | 2, 1, MaxProductCount);
     MDL.RelayControl = doc["MDL"]["RelayControl"] | 0;
     MDL.Is3Wire = doc["MDL"]["Is3Wire"] | true;
     MDL.WorkPin = doc["MDL"]["WorkPin"] | NC;

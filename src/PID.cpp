@@ -70,13 +70,16 @@ void PIDmotor(byte ID)
     float errorPct = (target > 0) ? (fabs(error) / target) * 100.0f : 0;
     if (errorPct <= deadband) error = 0;
 
-    // --- FEEDFORWARD (rango útil MinPWM → MaxPWM) ---
+    // --- FEEDFORWARD (rango útil basePWM → MaxPWM) ---
     float maxHz = Sensor[ID].MaxHz;
     if (maxHz <= 0) maxHz = 40.0f;
     float ffGain = Sensor[ID].FFGain > 0 ? Sensor[ID].FFGain : 1.0f;
-    float usableRange = (float)(Sensor[ID].MaxPWM - Sensor[ID].MinPWM);
-    float ff = (float)Sensor[ID].MinPWM + (target / maxHz) * usableRange * ffGain;
-    ff = constrain(ff, (float)Sensor[ID].MinPWM, (float)Sensor[ID].MaxPWM);
+    float basePWM = (float)Sensor[ID].MinPWM;
+    if (isHyd && Sensor[ID].HydDeadZonePWM > basePWM)
+        basePWM = Sensor[ID].HydDeadZonePWM;
+    float usableRange = (float)Sensor[ID].MaxPWM - basePWM;
+    float ff = basePWM + (target / maxHz) * usableRange * ffGain;
+    ff = constrain(ff, basePWM, (float)Sensor[ID].MaxPWM);
 
     // --- PROPORCIONAL ---
     float pTerm = error * Sensor[ID].Kp;

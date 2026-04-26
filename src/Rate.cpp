@@ -14,7 +14,7 @@ uint32_t LastPulse[MaxProductCount];
 volatile uint32_t ReadLast[MaxProductCount];
 volatile uint32_t PulseTime[MaxProductCount];
 volatile uint16_t PulseCount[MaxProductCount];
-volatile uint32_t TotalInterrupts[2] = {0, 0};
+volatile uint32_t TotalInterrupts[MaxProductCount] = {0};
 
 // Cachear el filtro desde la config (llamar después de LoadData)
 void CachePulseFilter()
@@ -96,4 +96,20 @@ void GetUPM()
             Sensor[i].RPM = 0;
         }
     }
+}
+
+// Reset limpio de contadores para calibración
+void ResetPulseCounters(byte ID)
+{
+    noInterrupts();
+    PulseCount[ID] = 0;
+    PulseTime[ID] = 0;
+    ReadLast[ID] = micros();
+    interrupts();
+
+    Sensor[ID].TotalPulses = 0;
+    Sensor[ID].Hz = 0;
+    Sensor[ID].UPM = 0;
+    Sensor[ID].RPM = 0;
+    LastPulse[ID] = millis();
 }
