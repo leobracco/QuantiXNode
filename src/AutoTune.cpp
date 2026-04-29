@@ -5,6 +5,7 @@
 // ============================================================================
 
 #include <Arduino.h>
+#include <PubSubClient.h>
 #include "Globals.h"
 #include "Structs.h"
 
@@ -107,6 +108,34 @@ void AutoTuneStop(byte ID)
     Serial.printf("[AutoTune] M%d DETENIDO\n", ID);
 }
 
+static void CalculateAndPublish(byte ID)
+{
+    auto &at = _at[ID];
+
+    at.Tu = at.periodSum / (float)at.periodCount;
+
+    float amplitude = (at.peakHigh - at.peakLow) / 2.0f;
+    if (amplitude < 0.1f) amplitude = 0.1f;
+
+    float d = (at.relayHigh - at.relayLow) / 2.0f;
+
+    at.Ku = (4.0f * d) / (3.14159f * amplitude);
+
+    float TuSec = at.Tu / 1000.0f;
+    at.calcKp = 0.6f * at.Ku;
+    at.calcKi = 2.0f * at.calcKp / TuSec;
+    at.calcKd = at.calcKp * TuSec / 8.0f;
+
+    at.calcKp = constrain(at.calcKp, 0.1f, 500.0f);
+    at.calcKi = constrain(at.calcKi, 0.1f, 200.0f);
+    at.calcKd = constrain(at.calcKd, 0.0f, 100.0f);
+
+    Serial.printf("[AutoTune] M%d RESULTADO: Ku=%.1f Tu=%.0fms -> Kp=%.1f Ki=%.1f Kd=%.1f\n",
+                  ID, at.Ku, at.Tu, at.calcKp, at.calcKi, at.calcKd);
+
+    PublishResult(ID);
+}
+
 // Llamar desde el loop principal (cada 50ms, después de GetUPM).
 void AutoTuneTick(byte ID)
 {
@@ -119,21 +148,20 @@ void AutoTuneTick(byte ID)
     // Timeout: 30 segundos máximo.
     if (now - at.startTime > 30000)
     {
-        if (at.periodCount >= 3)
-        {
-            // Suficientes datos — calcular.
-            at.done = true;
-        }
-        else
-        {
-            at.failed = true;
-        }
         at.active = false;
         SetPWM(ID, 0);
         Sensor[ID].AutoOn = true;
 
-        if (at.done) goto calculate;
-        PublishResult(ID);
+        if (at.periodCount >= 3)
+        {
+            at.done = true;
+            CalculateAndPublish(ID);
+        }
+        else
+        {
+            at.failed = true;
+            PublishResult(ID);
+        }
         return;
     }
 
@@ -157,11 +185,10 @@ void AutoTuneTick(byte ID)
         at.crossingCount++;
         if (at.crossingCount >= 3 && at.lastCrossing > 0)
         {
-            // Período = tiempo entre cruces del mismo signo (cada 2 cruces).
             if (at.crossingCount % 2 == 1)
             {
                 float period = (float)(now - at.lastCrossing);
-                if (period > 200 && period < 15000) // Período válido: 200ms - 15s
+                if (period > 200 && period < 15000)
                 {
                     at.periodSum += period;
                     at.periodCount++;
@@ -183,42 +210,8 @@ void AutoTuneTick(byte ID)
             at.active = false;
             SetPWM(ID, 0);
             Sensor[ID].AutoOn = true;
-            goto calculate;
+            CalculateAndPublish(ID);
         }
-    }
-
-    return;
-
-calculate:
-    {
-        // Período último promedio.
-        at.Tu = at.periodSum / (float)at.periodCount;
-
-        // Amplitud de oscilación.
-        float amplitude = (at.peakHigh - at.peakLow) / 2.0f;
-        if (amplitude < 0.1f) amplitude = 0.1f;
-
-        // Amplitud del relay.
-        float d = (at.relayHigh - at.relayLow) / 2.0f;
-
-        // Ganancia última (Ku).
-        at.Ku = (4.0f * d) / (3.14159f * amplitude);
-
-        // Ziegler-Nichols PID.
-        float TuSec = at.Tu / 1000.0f;
-        at.calcKp = 0.6f * at.Ku;
-        at.calcKi = 2.0f * at.calcKp / TuSec;
-        at.calcKd = at.calcKp * TuSec / 8.0f;
-
-        // Clamp a valores razonables.
-        at.calcKp = constrain(at.calcKp, 5.0f, 500.0f);
-        at.calcKi = constrain(at.calcKi, 1.0f, 200.0f);
-        at.calcKd = constrain(at.calcKd, 0.0f, 100.0f);
-
-        Serial.printf("[AutoTune] M%d RESULTADO: Ku=%.1f Tu=%.0fms → Kp=%.1f Ki=%.1f Kd=%.1f\n",
-                      ID, at.Ku, at.Tu, at.calcKp, at.calcKi, at.calcKd);
-
-        PublishResult(ID);
     }
 }
 
