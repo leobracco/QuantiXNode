@@ -132,8 +132,8 @@ void AutoTuneTick(byte ID)
     float actual = Sensor[ID].Hz;
     uint32_t now = millis();
 
-    // Timeout: 45 segundos máximo.
-    if (now - at.startTime > 45000)
+    // Timeout: 60 segundos máximo.
+    if (now - at.startTime > 60000)
     {
         at.active = false;
         Sensor[ID].PWM = 0;
@@ -200,7 +200,7 @@ void AutoTuneTick(byte ID)
     }
 
     // Si tenemos suficientes ciclos completos, terminar.
-    if (at.fullCycles >= 4)
+    if (at.fullCycles >= 6)
     {
         at.done = true;
         at.active = false;
