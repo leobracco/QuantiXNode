@@ -7,6 +7,8 @@
 #include <PCF8574.h>
 #include <WebServer.h>
 
+#define FW_VERSION "2.1.0"
+
 extern const uint16_t InoID;
 extern const uint8_t InoType;
 

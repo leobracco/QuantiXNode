@@ -19,6 +19,9 @@ bool apFallbackActive = false;
 bool mqttDebugEnabled = false;
 uint32_t mqttMsgCount = 0;
 
+// Flag para diferir SaveData() al loop principal (evita bloqueo flash en callback).
+volatile bool mqttPendingSave = false;
+
 // Identidad Única
 char uid[13];
 
@@ -119,8 +122,8 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                     ResetPIDState(id);
                 }
             }
-            SaveData();
-            CachePulseFilter(); // Actualizar filtro ISR si cambió PulseMin
+            mqttPendingSave = true; // Diferido al loop — SaveData() bloquea flash 5-20ms
+            CachePulseFilter();   // Actualizar filtro ISR si cambió PulseMin
         }
     }
 
@@ -292,12 +295,15 @@ boolean mqttReconnect()
         Serial.printf("📡 Suscrito a secciones: %s\n", topicSections);
 
         // ANUNCIO
-        StaticJsonDocument<200> ann;
+        StaticJsonDocument<256> ann;
         ann["uid"] = uid;
         ann["ip"] = WiFi.localIP().toString();
-        ann["type"] = "MOTOR";
+        ann["type"] = "QuantiX";
+        ann["fw"] = FW_VERSION;
+        ann["motors"] = MDL.SensorCount;
+        ann["uptime"] = millis() / 1000;
 
-        char buffer[200];
+        char buffer[256];
         serializeJson(ann, buffer);
         mqttClient.publish("agp/quantix/announcement", buffer, true); // retained
 

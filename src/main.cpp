@@ -46,6 +46,7 @@ volatile uint32_t WheelCounts = 0;
 extern void DoSetup();
 extern void initMQTT();
 extern void mqttLoop();
+extern volatile bool mqttPendingSave;
 
 void setup()
 {
@@ -73,9 +74,16 @@ void loop()
     {
         LoopLast = millis();
 
-        // Obtener datos de sensores
+        // Obtener datos de sensores (primero, antes de cualquier I/O bloqueante).
         GetUPM();
         GetSpeed();
+
+        // SaveData diferido desde callback MQTT (evita bloqueo flash en ISR context).
+        if (mqttPendingSave)
+        {
+            mqttPendingSave = false;
+            SaveData();
+        }
 
         // 3. Watchdog: corte de motor si se pierde comunicación MQTT
         for (int i = 0; i < MDL.SensorCount && i < MaxProductCount; i++)
