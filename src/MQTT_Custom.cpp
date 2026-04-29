@@ -194,6 +194,26 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
         Serial.println("]");
     }
 
+    // --- C0. AUTO-TUNE PID ---
+    else if (t == String(topicCmd))
+    {
+        const char *cmd = doc["cmd"] | "";
+        int id = doc["id"] | 0;
+        if (id < MDL.SensorCount)
+        {
+            if (strcmp(cmd, "autotune_start") == 0)
+            {
+                AutoTuneStart(id);
+                Serial.printf("🎯 AutoTune M%d iniciado por MQTT\n", id);
+            }
+            else if (strcmp(cmd, "autotune_stop") == 0)
+            {
+                AutoTuneStop(id);
+                Serial.printf("🎯 AutoTune M%d detenido por MQTT\n", id);
+            }
+        }
+    }
+
     // --- C. PROCESAR TEST (Slider web) ---
     else if (t == String(topicTest))
     {

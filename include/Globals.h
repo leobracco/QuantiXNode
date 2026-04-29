@@ -48,6 +48,10 @@ void IRAM_ATTR ISR_Sensor0B();
 void IRAM_ATTR ISR_Sensor1B();
 
 void PIDmotor(byte ID);
+void AutoTuneStart(byte ID);
+void AutoTuneStop(byte ID);
+void AutoTuneTick(byte ID);
+bool AutoTuneActive(byte ID);
 void AdjustFlow();
 void SetPWM(byte ID, float pwmVal = 0); 
 void GetUPM();

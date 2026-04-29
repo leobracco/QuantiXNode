@@ -128,10 +128,13 @@ void loop()
                     sendMQTTStatus(i);
                 }
             }
+            else if (AutoTuneActive(i))
+            {
+                AutoTuneTick(i); // Auto-calibración PID en curso.
+            }
             else
             {
-                // ELIMINADO: AdjustFlow(); <-- Esto rompía todo el I2C
-                PIDmotor(i); // El PID ahora es autosuficiente
+                PIDmotor(i);
             }
         }
 
