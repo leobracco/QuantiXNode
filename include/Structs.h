@@ -39,6 +39,7 @@ struct ModuleConfig {
 struct SensorConfig {
     // Pines de Hardware
     uint8_t FlowPin;
+    uint8_t FlowPinB;    // Segundo sensor (NC = deshabilitado, si presente promedia con FlowPin)
     uint8_t DirPin;
     uint8_t PWMPin;
     uint8_t IN1;

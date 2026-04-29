@@ -107,6 +107,19 @@ void DoSetup() {
             }
         }
 
+        // A2. Segundo sensor (FlowPinB) — opcional, promedia con el primero.
+        if (Sensor[i].FlowPinB != NC) {
+            pinMode(Sensor[i].FlowPinB, INPUT_PULLUP);
+            HasSensorB[i] = true;
+
+            if (i == 0) {
+                attachInterrupt(digitalPinToInterrupt(Sensor[i].FlowPinB), ISR_Sensor0B, RISING);
+            } else if (i == 1) {
+                attachInterrupt(digitalPinToInterrupt(Sensor[i].FlowPinB), ISR_Sensor1B, RISING);
+            }
+            Serial.printf("✅ Sensor B M%d en Pin %d (dual)\n", i, Sensor[i].FlowPinB);
+        }
+
         // B. Configurar Pines de Salida
         if (Sensor[i].DirPin != NC) pinMode(Sensor[i].DirPin, OUTPUT);
         if (Sensor[i].PWMPin != NC) pinMode(Sensor[i].PWMPin, OUTPUT);
@@ -215,6 +228,7 @@ void SaveData()
     for (int i = 0; i < 2; i++) { 
         JsonObject s = sensors.createNestedObject();
         s["FlowPin"] = Sensor[i].FlowPin;
+        s["FlowPinB"] = Sensor[i].FlowPinB;
         s["IN1"] = Sensor[i].IN1;
         s["IN2"] = Sensor[i].IN2;
         s["MotorType"] = (uint8_t)Sensor[i].MotorType;
@@ -290,6 +304,7 @@ void LoadData()
         uint8_t defIN2  = (i == 0) ? 33 : 26;
 
         Sensor[i].FlowPin = sensors[i]["FlowPin"] | defFlow;
+        Sensor[i].FlowPinB = sensors[i]["FlowPinB"] | NC;
         Sensor[i].IN1 = sensors[i]["IN1"] | defIN1;
         Sensor[i].IN2 = sensors[i]["IN2"] | defIN2;
         
@@ -391,13 +406,15 @@ void SetDefault()
     
     // Motor 0 (Semillas)
     Sensor[0].FlowPin = 17;
+    Sensor[0].FlowPinB = NC;  // Sin segundo sensor por default
     Sensor[0].IN1 = 32;
     Sensor[0].IN2 = 33;
 
     // Motor 1 (Fertilizante) - PINES DIFERENTES
     Sensor[1].FlowPin = 16; // Pin RX2
-    Sensor[1].IN1 = 25;     
-    Sensor[1].IN2 = 26;     
+    Sensor[1].FlowPinB = NC;
+    Sensor[1].IN1 = 25;
+    Sensor[1].IN2 = 26;
 
     // --- CONFIGURACIÓN PID Y LÓGICA (PARA AMBOS) ---
     for (int i = 0; i < 2; i++) {
