@@ -59,8 +59,17 @@ void SetPWM(byte ID, float pwmVal)
     if (duty > 4095)
         duty = 4095;
 
+    // ch1 = abre, ch2 = cierra (por convención del PID: PWM>0 abre).
+    // Si el motor está cableado al revés (+PWM cierra), InvertMotor intercambia
+    // los canales para que abrir/cerrar coincidan con el sentido físico.
     uint8_t ch1 = ID * 2;
     uint8_t ch2 = ID * 2 + 1;
+    if (CFG.InvertMotor)
+    {
+        uint8_t tmp = ch1;
+        ch1 = ch2;
+        ch2 = tmp;
+    }
 
     if (pwmVal > 0)
     {

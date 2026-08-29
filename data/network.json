@@ -1,9 +1,8 @@
 {
-  "IP0": 192,
-  "IP1": 168,
-  "IP2": 1,
-  "IP3": 125,
-  "SSID": "Personal-h24",
-  "Password": "bntrsrur5f",
-  "Mode": true
+  "_comment": "Imagen LittleFS de fábrica para red. Schema alineado con Begin.cpp::LoadNetworks. SSID/Password vacíos: el operario los configura desde el portal web del nodo (AP FX-xxxxxxxxx).",
+  "SSID": "",
+  "Password": "",
+  "Mode": true,
+  "BrokerHost": "192.168.5.10",
+  "BrokerPort": 1883
 }

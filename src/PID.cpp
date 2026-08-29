@@ -1,106 +1,138 @@
-#include <Arduino.h>
 #include "Globals.h"
-#include "Structs.h"
 
-// Variables de estado del PID
-uint32_t LastCheck[MaxProductCount];
-float LastPWM[MaxProductCount] = {0};
-float IntegralSum[MaxProductCount];
-
+/**
+ * Resetea las variables del PID para evitar saltos bruscos al arrancar
+ */
 void ResetPIDState(byte ID)
 {
+    if (ID >= MaxProductCount)
+        return;
+
     IntegralSum[ID] = 0.0f;
     LastPWM[ID] = 0.0f;
     Sensor[ID].PWM = 0;
     LastCheck[ID] = millis();
-    Serial.printf("[PID] Reset Estado Motor %d\n", ID);
 }
 
+/**
+ * Cálculo del algoritmo PID para el motor/válvula
+ */
 void PIDmotor(byte ID)
 {
-    if (Sensor[ID].PIDtime < 10)
-        Sensor[ID].PIDtime = 50;
+    if (ID >= MaxProductCount)
+        return;
 
-    // --- 1. MODO APAGADO O MANUAL ---
+    // Protección de tiempo mínimo
+    if (Sensor[ID].PIDtime < 10)
+        Sensor[ID].PIDtime = 10;
+
+    // Si el flujo está desactivado o no hay objetivo, apagamos y salimos
     if (!Sensor[ID].FlowEnabled || Sensor[ID].TargetUPM <= 0)
     {
-        IntegralSum[ID] = 0; // Limpiamos memoria
+        IntegralSum[ID] = 0;
         LastPWM[ID] = 0;
-
-        // Si no está en automático, usa el slider manual de la web. Si no, 0.
-        Sensor[ID].PWM = (!Sensor[ID].AutoOn) ? Sensor[ID].ManualAdjust : 0;
-        SetPWM(ID, Sensor[ID].PWM);
+        SetPWM(ID, 0);
+        Sensor[ID].PWM = 0;        // sin esto, telemetría mostraba PWM fantasma
+        Sensor[ID].PidState = 0; // off
         return;
     }
 
-    // --- 2. CÁLCULO PID AUTOMÁTICO ---
+    // Sin pulsos pero hay setpoint: caudalímetro o bomba cortada.
+    if (Sensor[ID].UPM <= 0.001f)
+    {
+        Sensor[ID].PidState = 1; // sin_pulsos
+    }
+
+    // Ejecutar solo si pasó el tiempo configurado (PIDtime)
     if (millis() - LastCheck[ID] >= Sensor[ID].PIDtime)
     {
-        float dt = (millis() - LastCheck[ID]) / 1000.0f;
-        if (dt <= 0.0)
-            dt = 0.05f;
+        uint32_t dt_ms = millis() - LastCheck[ID];
+        float dt = dt_ms / 1000.0f; // Delta tiempo en segundos
         LastCheck[ID] = millis();
 
-        float target = Sensor[ID].TargetUPM;
-        float actual = Sensor[ID].UPM;
-        float error = target - actual;
+        (void)dt; // sin término integral no se usa dt (ver nota de abajo)
 
-        // A) Zona Muerta (Evita que el motor "tiemble" cuando ya llegó)
-        float errorPct = (fabs(error) / target) * 100.0f;
-        if (errorPct <= Sensor[ID].Deadband)
+        float error = Sensor[ID].TargetUPM - Sensor[ID].UPM; // en UPM (Hz)
+
+        // ── CONTROL DE VÁLVULA MOTORIZADA (3-posiciones: abrir/mantener/cerrar) ──
+        // La válvula es un actuador INTEGRADOR: el motor con puente H GIRA para
+        // mover la válvula; el PWM es la VELOCIDAD del motor (con signo), NO el
+        // caudal. La posición de la válvula = integral de esa velocidad. PWM 0 =
+        // motor parado = la válvula MANTIENE el caudal.
+        //   error > 0 (falta caudal) → abrir  → output > 0
+        //   error < 0 (sobra caudal) → cerrar → output < 0
+        //   |error| chico            → mantener → output 0
+        //
+        // NO se usa término integral: sobre un actuador integrador el integral
+        // se satura mientras la válvula abre y, al llegar al objetivo, sigue
+        // empujando a abrir (windup) → "se queda abriendo con los litros ya
+        // correctos". El propio actuador integra, así que un proporcional con
+        // banda muerta alcanza el objetivo sin offset acumulado.
+        IntegralSum[ID] = 0.0f;
+
+        // Banda muerta de CAUDAL (hold-band): si estamos suficientemente cerca
+        // del objetivo, paramos el motor y la válvula mantiene su posición. Sin
+        // esto el lazo nunca "suelta". 3% del objetivo con un piso absoluto chico
+        // (evita perseguir ruido del caudalímetro a objetivos bajos).
+        float holdBand = Sensor[ID].TargetUPM * 0.03f;
+        if (holdBand < 0.05f) holdBand = 0.05f;
+
+        float output;
+        bool saturado = false;
+
+        if (fabs(error) <= holdBand)
         {
-            error = 0;
+            output = 0.0f; // mantener
+        }
+        else
+        {
+            // BANDA PROPORCIONAL: mapeamos la MAGNITUD del error al rango de
+            // velocidad del motor [MinPWM, MaxPWM]. Cerca del objetivo (error
+            // chico, recién fuera del hold-band) → MinPWM, gira lento y suave;
+            // caudal lejos del objetivo (error grande) → MaxPWM, gira rápido.
+            //
+            // Por qué NO Kp·error directo: con Kp del autotune (~100) y el error
+            // en Hz (objetivo de pocos Hz), Kp·error nunca llega a MinPWM (~2541),
+            // así que el motor quedaba SIEMPRE pisado al mínimo y tardaba muchísimo
+            // en corregir. Normalizando al objetivo el lazo se auto-escala sin
+            // depender de las ganancias PID (que son de modelo bomba, no aplican
+            // a una válvula motorizada integradora).
+            //
+            // "Error de velocidad plena" = el objetivo: si el caudal está a cero
+            // (error == objetivo) vamos a MaxPWM. Piso 0.1 Hz para objetivos bajos.
+            float fullErr = Sensor[ID].TargetUPM;
+            if (fullErr < 0.1f) fullErr = 0.1f;
+
+            float frac = (fabs(error) - holdBand) / (fullErr - holdBand);
+            frac = constrain(frac, 0.0f, 1.0f);
+
+            // Piso de PWM por sentido: abrir (error>0 → output>0) usa MinPWM,
+            // cerrar (error<0 → output<0) usa MinPWMNeg. Cada sentido vence su
+            // propia fricción mecánica, que suele ser distinta.
+            float minFloor = (error > 0) ? (float)Sensor[ID].MinPWM
+                                         : (float)Sensor[ID].MinPWMNeg;
+            float mag = minFloor +
+                        frac * (float)(Sensor[ID].MaxPWM - minFloor);
+
+            output = (error > 0 ? +mag : -mag);
+
+            saturado = (frac >= 1.0f);
         }
 
-        // B) Término Proporcional (Reacción inmediata)
-        float pTerm = error * Sensor[ID].Kp;
-
-        // C) Término Integral (Fuerza acumulativa) con ANTI-WINDUP
-        // Solo integramos si no estamos chocando contra los límites de hardware
-        bool saturadoAlto = (LastPWM[ID] >= Sensor[ID].MaxPWM && error > 0);
-        bool saturadoBajo = (LastPWM[ID] <= Sensor[ID].MinPWM && error < 0);
-
-        if (!saturadoAlto && !saturadoBajo && error != 0)
-        {
-            IntegralSum[ID] += (error * Sensor[ID].Ki * dt);
-
-            // Límite de seguridad para la memoria integral
-            float iLimit = Sensor[ID].MaxIntegral > 0 ? Sensor[ID].MaxIntegral : 4095.0f;
-            IntegralSum[ID] = constrain(IntegralSum[ID], -iLimit, iLimit);
-        }
-
-        // D) Salida Teórica
-        float output = pTerm + IntegralSum[ID];
-
-        // E) Vencer Inercia: Si calculó algo mayor a 0, pero menor al mínimo de arranque, forzamos el mínimo
-        if (output > 0 && output < Sensor[ID].MinPWM)
-        {
-            output = Sensor[ID].MinPWM;
-        }
-
-        // F) Slew Rate (Aceleración controlada para cuidar los engranajes)
-        if (Sensor[ID].SlewRate > 0)
-        {
-            float maxChange = Sensor[ID].SlewRate;
-            if (output > LastPWM[ID] + maxChange)
-                output = LastPWM[ID] + maxChange;
-            if (output < LastPWM[ID] - maxChange)
-                output = LastPWM[ID] - maxChange;
-        }
-
-        // G) Límite Físico Final
-        output = constrain(output, Sensor[ID].MinPWM, Sensor[ID].MaxPWM);
-
-        // --- 3. APLICAR AL HARDWARE ---
+        // Aplicar a los actuadores (SetPWM>0 abre, <0 cierra, 0 mantiene)
+        Sensor[ID].PWM = output;
         LastPWM[ID] = output;
-        Sensor[ID].PWM = (int)output;
-        SetPWM(ID, Sensor[ID].PWM);
+        SetPWM(ID, output);
 
-        // --- 4. DEBUG DE ALTA CALIDAD ---
-        if (ID == 0)
-        {
-            Serial.printf("⚙️ PID[M0] TGT:%.1f ACT:%.1f | ERR:%.1f | P:%.1f I:%.1f | OUT:%.0f\n",
-                          target, actual, error, pTerm, IntegralSum[ID], output);
-        }
+        // Estado del lazo para telemetría:
+        //   1=sin_pulsos (no medimos caudal pese a setpoint) — prioritario
+        //   2=saturado (pegado al techo con error)
+        //   3=ok (regulando o manteniendo en banda muerta)
+        if (Sensor[ID].UPM <= 0.001f)
+            Sensor[ID].PidState = 1;
+        else if (saturado)
+            Sensor[ID].PidState = 2;
+        else
+            Sensor[ID].PidState = 3;
     }
 }

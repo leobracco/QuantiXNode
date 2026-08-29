@@ -1,78 +1,85 @@
-#include <Arduino.h>
-#include <Adafruit_PWMServoDriver.h>
-#include <PCF8574.h>
 #include "Globals.h"
-#include "Structs.h"
 
-bool RelayStatus[16];
-
-void CheckRelays()
+// Resuelve qué modo de electroválvula usar para una sección dada.
+//   true  → 3 cables (on/off simple sobre pinA)
+//   false → 2 cables (inversión de polaridad pinA/pinB)
+// Si el override per-sección es -1 (default), cae al CFG.Is3Wire global.
+static inline bool sectionIs3Wire(int i)
 {
-    uint8_t NewLo = 0;
-    uint8_t NewHi = 0;
+    if (i < 0 || i >= 10) return CFG.Is3Wire;
+    int8_t ov = CFG.SectionIs3Wire[i];
+    if (ov == 0) return false;
+    if (ov == 1) return true;
+    return CFG.Is3Wire;
+}
 
-    if (WifiMasterOn)
+void processValves(uint16_t bits)
+{
+    // OVERRIDE manual desde el portal web — bits seteados en sectionForceOff
+    // fuerzan esa sección APAGADA aunque AOG la mande prendida en el target.
+    // Es un kill-switch operativo para tirar una sección rápido sin pasar
+    // por AOG (p. ej. para mantenimiento o sección rota).
+    bits &= ~sectionForceOff;
+
+    seccionesBits = bits;
+
+    // 1. Válvula Master: mayor potencia (usualmente GPIO 14 o pin dedicado).
+    //    Se enciende sólo si hay alguna sección abierta Y dosis objetivo > 0.
+    bool masterActive = (bits > 0 && CFG.dosisTarget > 0);
+    if (CFG.MasterPin != NC)
     {
-        if (millis() - WifiSwitchesTimer > 30000)   
+        digitalWrite(CFG.MasterPin, CFG.InvertRelay ? !masterActive : masterActive);
+    }
+
+    // 2. Control de secciones — hasta 10 (consistente con SectionPins[10][2]).
+    //    Antes era hasta 8 por mover bits sobre lowByte; ahora leemos cada
+    //    bit directo del uint16_t.
+    for (int i = 0; i < 10; i++)
+    {
+        bool state = (bits >> i) & 0x1;
+
+        if (sectionIs3Wire(i))
         {
-            WifiMasterOn = false;
+            // --- 3 CABLES: on/off simple ---
+            // Cable común a +V, cable común a GND, cable de control que
+            // sale "positivo" (HIGH) para abrir o "nada" (LOW) para cerrar.
+            // pinA = línea de control. pinB no se usa en este modo.
+            uint8_t pin = CFG.SectionPins[i][0];
+            if (pin != NC)
+                digitalWrite(pin, CFG.InvertRelay ? !state : state);
         }
         else
         {
-            for (int i = 0; i < 8; i++)
+            // --- 2 CABLES: inversión de polaridad (motorizada / latching) ---
+            // Driver tipo puente-H sobre pinA/pinB. Abrir = pinA+ pinB-,
+            // cerrar = pinA- pinB+. InvertRelay no aplica acá: es polaridad,
+            // no lógica de activación.
+            uint8_t pinA = CFG.SectionPins[i][0];
+            uint8_t pinB = CFG.SectionPins[i][1];
+            if (pinA != NC && pinB != NC)
             {
-                if (Button[i]) bitSet(NewLo, i);
-                if (Button[i + 8]) bitSet(NewHi, i);
+                if (state)
+                { // Abrir
+                    digitalWrite(pinA, HIGH);
+                    digitalWrite(pinB, LOW);
+                }
+                else
+                { // Cerrar
+                    digitalWrite(pinA, LOW);
+                    digitalWrite(pinB, HIGH);
+                }
             }
         }
     }
-    // Timeout de seguridad: Si no hay coms en 4 segundos, apagar todo
-    else if ((millis() - Sensor[0].CommTime < 4000) || (MDL.SensorCount > 1 && (millis() - Sensor[1].CommTime < 4000)))
+}
+
+void CheckRelays()
+{
+    // Timeout de seguridad: 4 segundos sin recibir datos del Bridge.
+    // Cortamos todo para que la pulverizadora no quede pulsando sin control
+    // si AOG/AgIO se cae o la red MQTT se corta.
+    if (millis() - Sensor[0].CommTime > 4000)
     {
-        NewLo = RelayLo;
-        NewHi = RelayHi;
-    }
-
-    // LOGICA DE HARDWARE
-    switch (MDL.RelayControl)
-    {
-    case 0: // None
-        break;
-
-    case 1: // GPIO
-        for (int i = 0; i < 8; i++)
-        {
-            bool state = bitRead(NewLo, i);
-            // Pines definidos en MDL.RelayControlPins
-            if (MDL.RelayControlPins[i] != NC) {
-                 digitalWrite(MDL.RelayControlPins[i], MDL.InvertRelay ? !state : state);
-            }
-        }
-        break;
-
-    case 5: // PCA9685
-        for (int i = 0; i < 8; i++)
-        {
-            bool state = bitRead(NewLo, i);
-            if(RelayStatus[i] != state) {
-                // PCA 0-15
-                if(state) PWMServoDriver.setPWM(i, 4096, 0); // ON
-                else PWMServoDriver.setPWM(i, 0, 4096);      // OFF
-                RelayStatus[i] = state;
-            }
-        }
-        // (Lógica similar para NewHi 8-15)
-        break;
-
-    case 6: // PCF8574
-        if (PCF_found)
-        {
-            for (int i = 0; i < 8; i++)
-            {
-                bool state = bitRead(NewLo, i);
-                PCF.write(i, MDL.InvertRelay ? !state : state);
-            }
-        }
-        break;
+        processValves(0);
     }
 }
